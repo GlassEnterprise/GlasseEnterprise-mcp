@@ -1,0 +1,24 @@
+{
+    "name": "hello-world-mcp",
+    "version": "1.0.0",
+    "description": "A minimal MCP server for the MCP hackathon with Cillers. Returns 'Hello World' via a simple tool.",
+    "main": "build/index.js",
+    "scripts": {
+        "build": "tsc",
+        "start": "node build/index.js"
+    },
+    "keywords": [
+        "mcp",
+        "hackathon",
+        "hello-world"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.17.2"
+    },
+    "devDependencies": {
+        "@types/node": "^24.2.1",
+        "typescript": "^5.9.2"
+    }
+}
