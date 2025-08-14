@@ -1,4 +1,4 @@
-# MCP Code Relationship Navigator
+# GlasseEnterprise - MCP Server
 
 A Model Context Protocol (MCP) server that scans one or more code repositories using Tree-sitter, extracts entities and relationships, and stores them in Neo4j. It exposes five tools:
 
