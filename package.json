@@ -1,24 +1,50 @@
 {
-    "name": "hello-world-mcp",
-    "version": "1.0.0",
-    "description": "A minimal MCP server for the MCP hackathon with Cillers. Returns 'Hello World' via a simple tool.",
+    "name": "GlassEnterprise",
+    "version": "0.1.0",
+    "description": "VS Code MCP server that scans code repositories using Tree-sitter, extracts relationships, and stores them in Neo4j. Provides scan, impact, query, learn commands and a basic graph visualization.",
     "main": "build/index.js",
+    "type": "module",
     "scripts": {
         "build": "tsc",
-        "start": "node build/index.js"
+        "dev": "tsc --watch",
+        "start": "node build/index.js",
+        "clean": "rm -rf build",
+        "create-env": "cp .env.example .env",
+        "setup": "npm run build && npm run create-env"
     },
     "keywords": [
         "mcp",
-        "hackathon",
-        "hello-world"
+        "tree-sitter",
+        "neo4j",
+        "graph",
+        "code-analysis",
+        "impact-analysis",
+        "vscode",
+        "knowledge-graph"
     ],
-    "author": "",
+    "author": "Cline",
     "license": "MIT",
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.17.2"
+        "@modelcontextprotocol/sdk": "^0.5.0",
+        "chokidar": "^3.5.3",
+        "dotenv": "^16.4.5",
+        "glob": "^10.3.10",
+        "ignore": "^5.3.1",
+        "neo4j-driver": "^5.22.0",
+        "tree-sitter": "^0.21.0",
+        "tree-sitter-c-sharp": "^0.21.1",
+        "tree-sitter-java": "^0.21.0",
+        "tree-sitter-javascript": "^0.21.0",
+        "tree-sitter-python": "^0.21.0",
+        "tree-sitter-typescript": "^0.21.1",
+        "winston": "^3.13.0",
+        "yaml": "^2.5.0"
     },
     "devDependencies": {
-        "@types/node": "^24.2.1",
-        "typescript": "^5.9.2"
+        "@types/node": "^20.14.12",
+        "typescript": "^5.5.4"
+    },
+    "engines": {
+        "node": ">=18.0.0"
     }
 }
