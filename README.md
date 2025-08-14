@@ -1,88 +1,417 @@
-# Hello World MCP
+# MCP Code Relationship Navigator
 
-A minimal MCP server in JavaScript for the MCP hackathon with Cillers. Exposes a simple tool that returns "Hello World".
+A Model Context Protocol (MCP) server that scans one or more code repositories using Tree-sitter, extracts entities and relationships, and stores them in Neo4j. It exposes five tools:
+
+- scan — Ingest repositories and optionally watch for incremental changes
+- impact — Change impact analysis for a given file
+- query — Natural-language or raw Cypher queries over the code graph
+- learn — Onboarding guide with schema, examples, and validation queries
+- reset — Clear all data from Neo4j database for fresh scans
+
+Works with Cline (VS Code) and any MCP-compatible client over stdio.
+
+## Why use this
+
+- Build a knowledge graph of your repositories , codebase: Files, Classes, Functions, Variables
+- Detect APIs provided and consumed, config usages, database tables, tests, and error messages
+- Understand dependencies such as CALLS, PROVIDES_API, USES_API, QUERIES, USES_CONFIG, EMITS_ERROR
+- Run NL/Cypher queries and impact analysis for safer refactors and faster navigation
 
 ## Features
 
-- Simple HTTP server using Node.js
-- MCP tool endpoint: `/tool/hello` (GET) returns `{ "message": "Hello World" }`
-- MCP tool endpoint: `/tool/time` (GET) returns `{ "time": "<current ISO time>" }`
+- Multi-language parsing via Tree-sitter: JavaScript/TypeScript, Python, Java, C#
+- Include/exclude file globs and ignore patterns
+- Incremental watch mode using chokidar
+- Neo4j persistence with upserts (nodes and relationships)
+- Deterministic NL → Cypher heuristics, plus raw Cypher passthrough with CYPHER:
+- Secure Neo4j connection handling, with a dev-only TLS bypass option for self-signed certs
 
-## Getting Started
+## Requirements
 
-1. **Install dependencies** (if any are added in the future):
+- Node.js >= 18
+- Neo4j (Desktop, Aura, or Docker)
+- Recommended: APOC plugin enabled on Neo4j
+  - Note: Generic non-API entities are upserted with `apoc.merge.node(...)`. API nodes use plain `MERGE`. If APOC is unavailable, you may adapt `src/neo4j/saveNodes.ts` to use plain MERGE for all entities.
 
-   ```bash
-   npm install
-   ```
+Optional performance/timeouts (environment variables):
 
-2. **Run the server:**
+- `NEO4J_CONNECTION_TIMEOUT_MS` (default 8000)
+- `NEO4J_QUERY_TIMEOUT_MS` (default 30000)
+- `NEO4J_MAX_POOL_SIZE` (default 50)
+- `NODE_TLS_REJECT_UNAUTHORIZED=0` (dev only; enables self-signed TLS via bolt+ssc)
 
-   ```bash
-   npm start
-   ```
-
-   The server will start on port 3000 by default.
-
-3. **Test the MCP tools:**
-
-   - Hello World tool:
-
-     ```
-     curl http://localhost:3000/tool/hello
-     ```
-
-     Response:
-
-     ```json
-     { "message": "Hello World" }
-     ```
-
-   - Time Now tool:
-
-     ```
-     curl http://localhost:3000/tool/time
-     ```
-
-     Response:
-
-     ```json
-     { "time": "2025-11-08T09:36:40.000Z" }
-     ```
-
-## Configuration
-
-You can configure the MCP server using environment variables:
-
-- `PORT`: Set the port for the server (default: 3000)
-
-Example:
+## Installation
 
 ```bash
-PORT=4000 npm start
+cd GlassEnterprise
+npm install
+npm run build
 ```
 
-## Cline Integration
+Create a `.env` at the project root (the server loads `../.env` relative to `build/`):
 
-To add this MCP to Cline, register it in your Cline MCP servers configuration. Example (servers.json):
+```bash
+# Required
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your-password
+NEO4J_DATABASE=neo4j
+
+# Optional
+NEO4J_CONNECTION_TIMEOUT_MS=8000
+NEO4J_QUERY_TIMEOUT_MS=30000
+NEO4J_MAX_POOL_SIZE=50
+
+# DEV TLS bypass (self-signed): keeps encryption but skips strict verification
+# NODE_TLS_REJECT_UNAUTHORIZED=0
+```
+
+Manual run (for testing over stdio without a GUI client):
+
+```bash
+node build/index.js
+```
+
+This server speaks MCP over stdio (no HTTP listener). Use an MCP client (e.g., Cline) to call tools.
+
+## How it works (high level)
+
+1. scan
+
+- Collects files per repository (include/exclude globs)
+- Parses code with Tree-sitter to extract entities:
+  - File, Class, Function, Variable
+  - API (direction = provided | consumed), Config key usage, DatabaseTable, Test, ErrorMessage
+- Builds relationships:
+  - CONTAINS, DECLARES, HAS_FUNCTION
+  - CALLS, PROVIDES_API, USES_API, QUERIES, USES_CONFIG, EMITS_ERROR
+- Persists nodes and relationships to Neo4j (upserts)
+- Optional watch mode applies incremental updates
+
+2. impact
+
+- Seeds at a File node, traverses declared/contained entities and dependency-like edges for N hops, maps back to affected Files, summarizes affected files/APIs/tables/configs/errors/functions/classes/tests
+
+3. query
+
+- Natural-language → Cypher heuristics for common intents
+- Advanced templates for cycles and API-change impact
+- Smarter fallbacks (API-centric, function-centric, file-centric), plus raw `CYPHER:` passthrough
+
+4. learn
+
+- Prints an onboarding guide with node labels, relationship types, validation queries, and advanced ready-to-run Cypher examples
+
+## Using with Cline (VS Code)
+
+Method A: Cline settings UI
+
+1. Open Cline settings in VS Code
+2. Add an MCP server:
+   - Name: `GlassEnterprise`
+   - Command: `node`
+   - Arguments (update path to match your system):
+     ```json
+     ["/Users/ahman/Documents/Cline/GlassEnterprise/build/index.js"]
+     ```
+   - Environment:
+     ```json
+     {
+       "NEO4J_URI": "bolt://localhost:7687",
+       "NEO4J_USERNAME": "neo4j",
+       "NEO4J_PASSWORD": "your-password",
+       "NEO4J_DATABASE": "neo4j",
+       "NEO4J_CONNECTION_TIMEOUT_MS": "8000",
+       "NEO4J_QUERY_TIMEOUT_MS": "30000",
+       "NEO4J_MAX_POOL_SIZE": "50"
+       // For local dev with self-signed certs:
+       // "NODE_TLS_REJECT_UNAUTHORIZED": "0"
+     }
+     ```
+3. Reload Cline. You should see the tools: `scan`, `impact`, `query`, `learn`, `reset`.
+
+Method B: Command-line test (without Cline)
+
+```bash
+# List tools
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node build/index.js
+
+# Call a tool (example: learn)
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"learn","arguments":{}}}' | node build/index.js
+```
+
+## Using with other MCP clients/IDEs
+
+Any MCP client that launches a stdio server can use this:
+
+- Command: `node`
+- Args: `["/absolute/path/to/GlassEnterprise/build/index.js"]`
+- Env: same Neo4j variables as above
+
+If your client has a JSON config, it will usually look like:
 
 ```json
 {
-  "servers": [
-    {
-      "name": "hello-world-mcp",
-      "command": "node /absolute/path/to/MCP/hello-world-mcp/build/index.js",
-      "description": "Minimal MCP server for hackathon"
+  "mcpServers": {
+    "GlassEnterprise": {
+      "command": "node",
+      "args": ["/absolute/path/to/GlassEnterprise/build/index.js"],
+      "env": {
+        "NEO4J_URI": "bolt://localhost:7687",
+        "NEO4J_USERNAME": "neo4j",
+        "NEO4J_PASSWORD": "your-password",
+        "NEO4J_DATABASE": "neo4j"
+      }
     }
-  ]
+  }
 }
 ```
 
-Replace `/absolute/path/to/` with the actual path on your system.
+## Tool reference and examples
 
-## Project Structure
+The server declares tools in `src/index.ts`.
 
-- `src/index.js` — Main server file
+### 1) scan
+
+Description:
+
+- Scan one or more repositories using Tree-sitter to extract entities and relationships, then store them in Neo4j. Optionally enables a file watcher for incremental updates.
+
+Input:
+
+- `paths?: string[]` — absolute or relative repository roots. Default: `[process.cwd()]`
+- `watch?: boolean` — enable chokidar watcher. Default: `false`
+- `includeGlobs?: string[]` — include patterns, e.g., `["**/*.ts", "**/*.js"]`
+- `excludeGlobs?: string[]` — exclude patterns, e.g., `["node_modules/**"]`
+
+Examples:
+
+- Minimal (current repo):
+  ```json
+  {}
+  ```
+- Custom paths with watch:
+  ```json
+  { "paths": [".", "/path/to/another/repo"], "watch": true }
+  ```
+- Scoped by glob:
+  ```json
+  {
+    "includeGlobs": ["**/*.ts"],
+    "excludeGlobs": ["**/*.test.ts", "node_modules/**"]
+  }
+  ```
+
+Notes:
+
+- Watch mode applies incremental updates when files change (chokidar)
+- Output includes a summary of repositories, files scanned, entities, relationships
+
+### 2) impact
+
+Description:
+
+- Change impact analysis for a file. Returns affected files/APIs/tables/tests via dependency traversal.
+
+Input:
+
+- `file: string` (required) — path to file (absolute or relative to repo)
+- `repoRoot?: string` (recommended) — repository root path to disambiguate
+- `depth?: number` — traversal depth (default 3)
+
+Examples:
+
+- Basic:
+  ```json
+  { "file": "src/index.ts" }
+  ```
+- With explicit repoRoot and deeper traversal:
+  ```json
+  { "file": "src/utils/helper.ts", "repoRoot": "/abs/path/to/repo", "depth": 4 }
+  ```
+
+Output includes:
+
+- Affected file paths
+- Provided/Consumed APIs
+- Database tables
+- Config keys
+- Error messages
+- Functions and Classes touched
+- Related test files
+
+### 3) query
+
+Description:
+
+- Run a natural language query. Converts to Cypher or accepts raw `CYPHER: ...` queries.
+
+Input:
+
+- `prompt: string` (required)
+- `limit?: number` (default 100; appended unless query already has LIMIT)
+
+Raw Cypher passthrough:
+
+```text
+CYPHER: MATCH (f:Function)-[:CALLS]->(g:Function) RETURN f.name, g.name LIMIT 10
+```
+
+Natural language templates (examples):
+
+- Impact of a file change:
+  ```text
+  "affected files for file 'src/index.ts'"
+  ```
+- Provided APIs in a path:
+  ```text
+  "list provided apis in path 'src'"
+  ```
+- Consumed APIs in a path:
+  ```text
+  "show consumed apis for path 'services'"
+  ```
+- Who calls a function:
+  ```text
+  "which functions call function 'getUser'?"
+  ```
+- Configs used by a file:
+  ```text
+  "what configs are used in file 'src/app.ts'?"
+  ```
+
+Advanced templates:
+
+- Circular function-call dependencies (optional path scope)
+  - "circular function dependencies"
+  - "cyclic calls in 'src'"
+- Repository-level API consumption cycles
+  - "circular api dependencies across repositories"
+- Impact of API response change for a specific endpoint
+  - "impact of api response change in endpoint '/api/test'"
+  - "impact of changing GET '/v1/users'"
+
+Label-aware fallbacks:
+
+- API-centric when prompt suggests API concepts
+- Function-centric when discussing calls/invocations
+- File-centric when path-like tokens are present
+- Generic cross-label property search otherwise
+
+Result format:
+
+- Echoes the Cypher used and returns a JSON array of records
+
+### 4) learn
+
+Description:
+
+- Onboarding walkthrough of the repository graph. Explains schema, common queries, and advanced analyses.
+
+Input:
+
+- none
+
+Output includes:
+
+- Node labels: Repository, File, Class, Function, Variable, API, DatabaseTable, Config, Test, ErrorMessage
+- Relationship types: CONTAINS, DECLARES, HAS_FUNCTION, CALLS, PROVIDES_API, USES_API, QUERIES, USES_CONFIG, EMITS_ERROR
+- Validation queries and advanced analyses (ready-to-run Cypher)
+
+### 5) reset
+
+Description:
+
+- Reset the Neo4j database by deleting all nodes and relationships. Use this to clear all data before a fresh scan.
+
+Input:
+
+- `confirm?: boolean` — Confirmation flag to prevent accidental deletion (optional, defaults to true)
+
+Examples:
+
+- Basic reset (with confirmation):
+  ```json
+  {}
+  ```
+- Explicit confirmation:
+  ```json
+  { "confirm": true }
+  ```
+- Cancel reset:
+  ```json
+  { "confirm": false }
+  ```
+
+Output includes:
+
+- Count of deleted nodes and relationships
+- Confirmation that database is empty and ready for fresh scan
+- Warning if any nodes remain (partial reset)
+
+Use cases:
+
+- Clear database before scanning a different repository
+- Remove stale data after major refactoring
+- Start fresh after testing or experimentation
+- Clean up corrupted or inconsistent graph data
+
+## Quick start workflow
+
+1. learn
+
+- Understand what's in the graph and how to query it
+
+2. reset (optional)
+
+- Clear any existing data if starting fresh
+- Example: `{ "confirm": true }`
+
+3. scan
+
+- Ingest the current repository (optionally watch for changes)
+- Example args:
+  - `{}`
+  - `{ "watch": true }`
+  - `{ "paths": ["."], "includeGlobs": ["**/*.ts"], "excludeGlobs": ["**/*.test.ts", "node_modules/**"] }`
+
+4. query
+
+- Examples:
+  - `"list provided apis in path 'src'"`
+  - `"who calls function 'getUser'"`
+  - `"CYPHER: MATCH (f:File) RETURN f.file LIMIT 25"`
+
+5. impact
+
+- Example:
+  - `{ "file": "src/index.ts", "repoRoot": "/absolute/repo/path", "depth": 3 }`
+
+## Troubleshooting
+
+- Neo4j credentials missing
+  - Ensure `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` are set
+- TLS/certificate issues (local dev)
+  - Set `NODE_TLS_REJECT_UNAUTHORIZED=0` to allow self-signed (connection will use `bolt+ssc://`)
+- Aura/secure usage
+  - The server prefers secure `bolt+s://`; ensure URI/creds are correct
+- APOC not available
+  - Non-API entities use `apoc.merge.node`; enable APOC or modify `src/neo4j/saveNodes.ts` to use plain `MERGE`
+- No results after scan
+  - Check include/exclude globs; confirm files were discovered
+  - Validate using `learn` output and quick validation queries
+- Large repository performance
+  - Scope with `includeGlobs`/`excludeGlobs`
+  - Increase pool size/timeouts via env vars
+- Connection issues
+  - Tune `NEO4J_*` timeouts/pool
+  - Verify Neo4j is running and reachable on the specified port
+
+## Security
+
+- Do not commit secrets; use environment variables
+- Restrict Neo4j to trusted networks
+- Use strong passwords and rotate as needed
 
 ## License
 
