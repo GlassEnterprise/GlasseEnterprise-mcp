@@ -5,7 +5,7 @@
  * - REPO_PROVIDES_API and REPO_USES_API relationships for the repo
  *
  * Usage:
- *   node mcp-code-relationship-navigator/scripts/verify-repo-api-classification.js "/abs/path/to/repo"
+ *   node GlassEnterprise/scripts/verify-repo-api-classification.js "/abs/path/to/repo"
  */
 
 import { resolve } from "path";

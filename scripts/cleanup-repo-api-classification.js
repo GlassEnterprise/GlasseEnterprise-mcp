@@ -4,7 +4,7 @@
  * - Optionally deletes provided API entities for that repository (always enabled here)
  *
  * Usage:
- *   node mcp-code-relationship-navigator/scripts/cleanup-repo-api-classification.js "/abs/path/to/repo"
+ *   node GlassEnterprise/scripts/cleanup-repo-api-classification.js "/abs/path/to/repo"
  */
 
 import { resolve, dirname } from "path";

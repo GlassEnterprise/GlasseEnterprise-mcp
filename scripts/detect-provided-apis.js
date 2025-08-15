@@ -3,7 +3,7 @@
  * Uses the built analyzer directly to scan a repo and print provided API endpoints.
  *
  * Usage:
- *   node mcp-code-relationship-navigator/scripts/detect-provided-apis.js "/abs/path/to/repo"
+ *   node GlassEnterprise/scripts/detect-provided-apis.js "/abs/path/to/repo"
  */
 
 import { resolve } from "path";

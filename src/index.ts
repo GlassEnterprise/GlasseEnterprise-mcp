@@ -26,7 +26,6 @@ import { buildRelationships } from "./scanner/relationshipBuilder.js";
 import { runImpactAnalysis } from "./commands/impactCommand.js";
 import { runNaturalLanguageQuery } from "./commands/queryCommand.js";
 import { runLearn } from "./commands/learnCommand.js";
-import { runReset } from "./commands/resetCommand.js";
 import { extractDependencies } from "./scanner/dependencyExtractor.js";
 
 // NEW: repository entity creation helpers
@@ -38,7 +37,7 @@ const logger = new Logger("MCP-CRN");
 
 // Initialize MCP server
 const server = new Server(
-  { name: "mcp-code-relationship-navigator", version: "0.1.0" },
+  { name: "GlassEnterprise", version: "0.1.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -136,22 +135,6 @@ const AVAILABLE_TOOLS: Tool[] = [
       "Onboarding walkthrough of the repository graph. Explains schema, common queries, and examples.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
-  {
-    name: "reset",
-    description:
-      "Reset the Neo4j database by deleting all nodes and relationships. Use this to clear all data before a fresh scan.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        confirm: {
-          type: "boolean",
-          description: "Confirmation flag to prevent accidental deletion (optional, defaults to true)",
-          default: true,
-        },
-      },
-      required: [],
-    },
-  },
 ];
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -190,6 +173,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const excludeGlobs = (args?.excludeGlobs as string[] | undefined) ?? [];
 
         const start = Date.now();
+        const snapshotVersion = new Date().toISOString();
 
         // 1) Gather files per repo using globs
         const repoFiles = await scanRepositories(roots, {
@@ -208,9 +192,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         // 3) Build relationships between extracted entities
         const allRelationships = buildRelationships(allEntities);
 
-        // 4) Persist nodes and relationships in Neo4j
-        await upsertEntitiesBatch(driver, allEntities);
-        await upsertRelationshipsBatch(driver, allRelationships);
+        // 4) Persist nodes and relationships in Neo4j (versioned)
+        await upsertEntitiesBatch(driver, allEntities, snapshotVersion);
+        await upsertRelationshipsBatch(
+          driver,
+          allRelationships,
+          snapshotVersion
+        );
 
         const ms = Date.now() - start;
 
@@ -231,8 +219,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
               const updatedEntities = await extractEntities(delta);
               const merged = [...repoEntitiesDelta, ...updatedEntities];
               const updatedRels = buildRelationships(merged);
-              await upsertEntitiesBatch(driver, merged);
-              await upsertRelationshipsBatch(driver, updatedRels);
+              const sv = new Date().toISOString();
+              await upsertEntitiesBatch(driver, merged, sv);
+              await upsertRelationshipsBatch(driver, updatedRels, sv);
             }
           );
           watchMsg = "\nWatching for incremental changes (chokidar enabled).";
@@ -277,22 +266,6 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "learn": {
         const text = await runLearn(driver);
         return { content: [{ type: "text", text }] };
-      }
-
-      case "reset": {
-        const confirm = args?.confirm !== false; // Default to true if not specified
-        if (!confirm) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Reset cancelled. Set confirm to true to proceed with database reset.",
-              },
-            ],
-          };
-        }
-        const result = await runReset(driver, { confirm });
-        return { content: [{ type: "text", text: result }] };
       }
 
       default:

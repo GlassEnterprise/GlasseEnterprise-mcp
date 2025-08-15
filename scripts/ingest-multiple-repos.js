@@ -2,11 +2,11 @@
  * Ingest multiple repositories into Neo4j in a single pass to enable cross-repository linking.
  *
  * Usage:
- *   node mcp-code-relationship-navigator/scripts/ingest-multiple-repos.js "/abs/path/to/repoA" "/abs/path/to/repoB" [more...]
+ *   node GlassEnterprise/scripts/ingest-multiple-repos.js "/abs/path/to/repoA" "/abs/path/to/repoB" [more...]
  *
  * Notes:
  * - This script scans all provided roots together so CONSUMES_API_FROM and SHARES_PACKAGE_WITH can be created.
- * - Requires Neo4j credentials in mcp-code-relationship-navigator/.env or environment variables.
+ * - Requires Neo4j credentials in GlassEnterprise/.env or environment variables.
  */
 
 import { resolve, dirname } from "path";

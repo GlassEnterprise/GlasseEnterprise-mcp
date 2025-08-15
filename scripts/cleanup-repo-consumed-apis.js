@@ -4,7 +4,7 @@
  * - Deletes consumed API entities (direction: 'consumed') for that repository
  *
  * Usage:
- *   node mcp-code-relationship-navigator/scripts/cleanup-repo-consumed-apis.js "/abs/path/to/repo"
+ *   node GlassEnterprise/scripts/cleanup-repo-consumed-apis.js "/abs/path/to/repo"
  */
 
 import { resolve, dirname } from "path";

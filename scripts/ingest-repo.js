@@ -2,7 +2,7 @@
  * Ingest a repository into Neo4j using the latest local build without restarting the MCP server.
  *
  * Usage:
- *   node mcp-code-relationship-navigator/scripts/ingest-repo.js "/abs/path/to/repo"
+ *   node GlassEnterprise/scripts/ingest-repo.js "/abs/path/to/repo"
  */
 
 import { resolve, dirname } from "path";

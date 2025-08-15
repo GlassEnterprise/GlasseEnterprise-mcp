@@ -1,12 +1,11 @@
-# GlasseEnterprise - MCP Server
+# MCP Code Relationship Navigator
 
-A Model Context Protocol (MCP) server that scans one or more code repositories using Tree-sitter, extracts entities and relationships, and stores them in Neo4j. It exposes five tools:
+A Model Context Protocol (MCP) server that scans one or more code repositories using Tree-sitter, extracts entities and relationships, and stores them in Neo4j. It exposes four tools:
 
 - scan — Ingest repositories and optionally watch for incremental changes
 - impact — Change impact analysis for a given file
 - query — Natural-language or raw Cypher queries over the code graph
 - learn — Onboarding guide with schema, examples, and validation queries
-- reset — Clear all data from Neo4j database for fresh scans
 
 Works with Cline (VS Code) and any MCP-compatible client over stdio.
 
@@ -128,7 +127,7 @@ Method A: Cline settings UI
        // "NODE_TLS_REJECT_UNAUTHORIZED": "0"
      }
      ```
-3. Reload Cline. You should see the tools: `scan`, `impact`, `query`, `learn`, `reset`.
+3. Reload Cline. You should see the tools: `scan`, `impact`, `query`, `learn`.
 
 Method B: Command-line test (without Cline)
 
@@ -318,56 +317,13 @@ Output includes:
 - Relationship types: CONTAINS, DECLARES, HAS_FUNCTION, CALLS, PROVIDES_API, USES_API, QUERIES, USES_CONFIG, EMITS_ERROR
 - Validation queries and advanced analyses (ready-to-run Cypher)
 
-### 5) reset
-
-Description:
-
-- Reset the Neo4j database by deleting all nodes and relationships. Use this to clear all data before a fresh scan.
-
-Input:
-
-- `confirm?: boolean` — Confirmation flag to prevent accidental deletion (optional, defaults to true)
-
-Examples:
-
-- Basic reset (with confirmation):
-  ```json
-  {}
-  ```
-- Explicit confirmation:
-  ```json
-  { "confirm": true }
-  ```
-- Cancel reset:
-  ```json
-  { "confirm": false }
-  ```
-
-Output includes:
-
-- Count of deleted nodes and relationships
-- Confirmation that database is empty and ready for fresh scan
-- Warning if any nodes remain (partial reset)
-
-Use cases:
-
-- Clear database before scanning a different repository
-- Remove stale data after major refactoring
-- Start fresh after testing or experimentation
-- Clean up corrupted or inconsistent graph data
-
 ## Quick start workflow
 
 1. learn
 
-- Understand what's in the graph and how to query it
+- Understand what’s in the graph and how to query it
 
-2. reset (optional)
-
-- Clear any existing data if starting fresh
-- Example: `{ "confirm": true }`
-
-3. scan
+2. scan
 
 - Ingest the current repository (optionally watch for changes)
 - Example args:
@@ -375,14 +331,14 @@ Use cases:
   - `{ "watch": true }`
   - `{ "paths": ["."], "includeGlobs": ["**/*.ts"], "excludeGlobs": ["**/*.test.ts", "node_modules/**"] }`
 
-4. query
+3. query
 
 - Examples:
   - `"list provided apis in path 'src'"`
   - `"who calls function 'getUser'"`
   - `"CYPHER: MATCH (f:File) RETURN f.file LIMIT 25"`
 
-5. impact
+4. impact
 
 - Example:
   - `{ "file": "src/index.ts", "repoRoot": "/absolute/repo/path", "depth": 3 }`

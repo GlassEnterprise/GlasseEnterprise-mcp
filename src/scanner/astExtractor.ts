@@ -20,10 +20,45 @@ import {
   LanguageId,
   RepoFiles,
   RepositoryEntity,
+  SpringDataRepositoryEntity,
+  SecurityComponentEntity,
   TestEntity,
   VariableEntity,
+  TypeDefinitionEntity,
+  DeveloperEntity,
+  TeamEntity,
+  CommitEntity,
 } from "./types.js";
 import { Logger } from "../utils/logger.js";
+import {
+  parseSpringDataMethodName,
+  parseJPQL,
+  parseSQL,
+  isSpringDataRepository,
+  extractEntityInfo,
+  detectSpringSecurityComponent,
+  extractSecurityPaths,
+} from "./springAnalyzer.js";
+import {
+  processSpringDataRepository,
+  processSpringSecurityComponent,
+} from "./javaSpringEnhancer.js";
+import {
+  extractTSReturnType,
+  extractPythonReturnType,
+  extractJavaReturnType,
+  extractCSharpReturnType,
+  extractParameterTypes,
+  extractTSTypeDefinitions,
+  extractClassFields,
+  extractSpringResponseSchema,
+} from "./returnTypeExtractor.js";
+import {
+  extractDevelopersFromGit,
+  extractTeamFromCodeowners,
+  extractTeamFromMetadata,
+  inferTeamFromRepoStructure,
+} from "./developerAnalyzer.js";
 
 const logger = new Logger("AstExtractor");
 
@@ -452,14 +487,270 @@ function extractMethodFromFunctionName(fnText: string): string | undefined {
   return undefined;
 }
 
-// Basic AST traversal helper
-function walk(node: any, cb: (n: any) => void) {
-  cb(node);
-  const count = node.namedChildCount ?? 0;
-  for (let i = 0; i < count; i++) {
-    const child = node.namedChild(i);
-    if (child) walk(child, cb);
+// Robust AST traversal helper with improved cycle detection for tree-sitter nodes
+function walk(
+  node: any,
+  cb: (n: any) => void,
+  visitedNodes = new WeakSet<any>(),
+  visitedPositions = new Set<string>(),
+  depth = 0,
+  maxDepth = 500,
+  maxNodes = 10000
+) {
+  // Validate node before processing
+  if (!node || typeof node !== "object") {
+    return;
   }
+
+  // Prevent infinite loops using object reference (primary) and position (fallback)
+  if (visitedNodes.has(node)) {
+    return;
+  }
+
+  // Generate deterministic node ID based on position and type
+  let nodeId: string;
+  if (node.startPosition && node.endPosition && node.type) {
+    nodeId = `${node.type}:${node.startPosition.row}:${node.startPosition.column}-${node.endPosition.row}:${node.endPosition.column}`;
+  } else {
+    // Fallback: use type and depth for nodes without position
+    nodeId = `${node.type || "unknown"}:${depth}`;
+  }
+
+  // Secondary check with position-based ID
+  if (visitedPositions.has(nodeId)) {
+    return;
+  }
+
+  // Prevent stack overflow by limiting traversal depth
+  if (depth > maxDepth) {
+    logger.warn(
+      `AST traversal depth limit (${maxDepth}) reached at node type: ${
+        node.type || "unknown"
+      }`
+    );
+    return;
+  }
+
+  // Prevent excessive node processing
+  if (visitedPositions.size > maxNodes) {
+    logger.warn(`AST node limit (${maxNodes}) reached, stopping traversal`);
+    return;
+  }
+
+  // Mark node as visited
+  visitedNodes.add(node);
+  visitedPositions.add(nodeId);
+
+  try {
+    cb(node);
+
+    // Get child count safely with multiple fallbacks
+    let count = 0;
+    try {
+      if (typeof node.namedChildCount === "function") {
+        count = node.namedChildCount();
+      } else if (typeof node.namedChildCount === "number") {
+        count = node.namedChildCount;
+      } else if (node.namedChildren && Array.isArray(node.namedChildren)) {
+        count = node.namedChildren.length;
+      }
+    } catch (e) {
+      // If we can't get child count, try to access children array directly
+      if (node.namedChildren && Array.isArray(node.namedChildren)) {
+        count = node.namedChildren.length;
+      } else {
+        // If all methods fail, skip children
+        logger.debug(
+          `Cannot determine child count for node type: ${
+            node.type || "unknown"
+          }`
+        );
+        return;
+      }
+    }
+
+    // Limit the number of children we process to prevent exponential blowup
+    const maxChildren = Math.min(count, 50); // Reduced from 100 to be more conservative
+
+    // Track processed children to avoid duplicates
+    const processedChildren = new Set<any>();
+
+    for (let i = 0; i < maxChildren; i++) {
+      let child: any = null;
+
+      try {
+        // Try multiple methods to get child
+        if (typeof node.namedChild === "function") {
+          child = node.namedChild(i);
+        } else if (node.namedChildren && Array.isArray(node.namedChildren)) {
+          child = node.namedChildren[i];
+        }
+      } catch (e) {
+        // Skip this child if we can't access it
+        continue;
+      }
+
+      // Validate child and ensure it's not a circular reference
+      if (
+        child &&
+        child !== node &&
+        !processedChildren.has(child) &&
+        !visitedNodes.has(child)
+      ) {
+        processedChildren.add(child);
+
+        // Additional safety: check if child has valid structure
+        if (
+          typeof child === "object" &&
+          (child.type !== undefined || child.startPosition !== undefined)
+        ) {
+          walk(
+            child,
+            cb,
+            visitedNodes,
+            visitedPositions,
+            depth + 1,
+            maxDepth,
+            maxNodes
+          );
+        }
+      }
+    }
+
+    if (count > maxChildren) {
+      logger.debug(
+        `Limited child processing for ${
+          node.type || "unknown"
+        }: ${count} children, processed ${maxChildren}`
+      );
+    }
+  } catch (error) {
+    // Log error but don't continue traversal from this node to prevent propagating issues
+    logger.warn(
+      `Error walking AST node at depth ${depth}, type: ${
+        node.type || "unknown"
+      }: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+// Helper to find a node at a specific position
+function findNodeAtPosition(
+  root: any,
+  startLine: number,
+  endLine: number,
+  nodeType?: string
+): any | null {
+  let result: any = null;
+
+  // Use fresh visited sets for each search to avoid interference
+  walk(
+    root,
+    (node) => {
+      const nodeStart = (node.startPosition?.row ?? -1) + 1;
+      const nodeEnd = (node.endPosition?.row ?? -1) + 1;
+
+      // Check if this node matches the position
+      if (nodeStart === startLine && nodeEnd === endLine) {
+        // If nodeType is specified, check for matching type patterns
+        if (!nodeType) {
+          result = node;
+        } else if (nodeType === "function") {
+          if (
+            node.type === "function_declaration" ||
+            node.type === "method_declaration" ||
+            node.type === "function_definition" ||
+            node.type === "arrow_function" ||
+            node.type === "function_expression" ||
+            node.type === "method_definition"
+          ) {
+            result = node;
+          }
+        } else if (nodeType === "class") {
+          if (
+            node.type === "class_declaration" ||
+            node.type === "class_definition"
+          ) {
+            result = node;
+          }
+        } else if (node.type === nodeType) {
+          result = node;
+        }
+      }
+    },
+    new WeakSet<any>(), // Fresh visited nodes set
+    new Set<string>() // Fresh visited positions set
+  );
+
+  return result;
+}
+
+// Helper to check if a method is a Spring controller method
+function isControllerMethod(methodNode: any): boolean {
+  // Check if the method has Spring MVC annotations
+  function hasControllerAnnotation(node: any): boolean {
+    if (!node) return false;
+
+    // Check for modifiers/annotations
+    const modifiers = node.namedChildren?.find(
+      (c: any) => c.type === "modifiers"
+    );
+
+    if (modifiers?.namedChildren) {
+      for (const mod of modifiers.namedChildren) {
+        if (mod.type === "annotation" || mod.type === "marker_annotation") {
+          const text = mod.text || "";
+          // Check for Spring MVC mapping annotations
+          if (
+            text.includes("@GetMapping") ||
+            text.includes("@PostMapping") ||
+            text.includes("@PutMapping") ||
+            text.includes("@DeleteMapping") ||
+            text.includes("@PatchMapping") ||
+            text.includes("@RequestMapping") ||
+            text.includes("@ResponseBody")
+          ) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  // Check the method itself
+  if (hasControllerAnnotation(methodNode)) {
+    return true;
+  }
+
+  // Check if the enclosing class is a controller
+  let parent = methodNode?.parent;
+  while (parent) {
+    if (parent.type === "class_declaration") {
+      const modifiers = parent.namedChildren?.find(
+        (c: any) => c.type === "modifiers"
+      );
+
+      if (modifiers?.namedChildren) {
+        for (const mod of modifiers.namedChildren) {
+          if (mod.type === "annotation" || mod.type === "marker_annotation") {
+            const text = mod.text || "";
+            if (
+              text.includes("@RestController") ||
+              text.includes("@Controller")
+            ) {
+              return true;
+            }
+          }
+        }
+      }
+      break;
+    }
+    parent = parent.parent;
+  }
+
+  return false;
 }
 
 // JS/TS heuristics for APIs, configs, errors, tests
@@ -475,6 +766,21 @@ function analyzeJsTs(root: any, code: string) {
     functions: { name: string; start: number; end: number }[];
     classes: { name: string; start: number; end: number }[];
     variables: { name: string; start: number; end: number }[];
+    // Data lineage per-function context keyed by "name:start-end"
+    functionContexts: Record<
+      string,
+      {
+        reads: Set<string>;
+        writes: Set<string>;
+        derives: { target: string; sources: string[]; op?: string }[];
+        passesTo: {
+          callee: string;
+          argIndex: number;
+          sourceVar: string;
+          paramName?: string;
+        }[];
+      }
+    >;
   } = {
     provided: [],
     consumed: [],
@@ -485,6 +791,7 @@ function analyzeJsTs(root: any, code: string) {
     functions: [],
     classes: [],
     variables: [],
+    functionContexts: {},
   };
 
   // Heuristics to determine likely runtime context
@@ -499,6 +806,72 @@ function analyzeJsTs(root: any, code: string) {
   const likelyServerContext =
     serverImportsRegex.test(codeLower) || nodeServerRegex.test(codeLower);
   const likelyFrontendContext = frontendLibRegex.test(codeLower);
+
+  // Helpers for lineage
+  const getFunctionName = (fnNode: any): string => {
+    const nameNode = fnNode.childForFieldName?.("name") || fnNode.child?.(1);
+    const raw = nameNode?.text ?? "anonymous";
+    return raw;
+  };
+  const functionKey = (fnNode: any): string => {
+    const name = getFunctionName(fnNode);
+    const start =
+      fnNode.startPosition?.row != null ? fnNode.startPosition.row + 1 : -1;
+    const end =
+      fnNode.endPosition?.row != null ? fnNode.endPosition.row + 1 : -1;
+    return `${name}:${start}-${end}`;
+  };
+  const enclosingFunctionKey = (node: any): string | null => {
+    let p = node?.parent;
+    while (p) {
+      if (
+        p.type === "function_declaration" ||
+        p.type === "method_definition" ||
+        p.type === "function" ||
+        p.type === "function_expression" ||
+        p.type === "arrow_function"
+      ) {
+        return functionKey(p);
+      }
+      p = p.parent;
+    }
+    return null;
+  };
+  const getCtx = (key: string) => {
+    const existing = findings.functionContexts[key];
+    if (existing) return existing;
+    const created = {
+      reads: new Set<string>(),
+      writes: new Set<string>(),
+      derives: [] as { target: string; sources: string[]; op?: string }[],
+      passesTo: [] as {
+        callee: string;
+        argIndex: number;
+        sourceVar: string;
+        paramName?: string;
+      }[],
+    };
+    findings.functionContexts[key] = created;
+    return created;
+  };
+  const collectIdentifiers = (node: any): string[] => {
+    const out: string[] = [];
+    if (!node) return out;
+    const stack = [node];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (!cur) break;
+      if (cur.type === "identifier") {
+        out.push(cur.text);
+      }
+      const count = cur.namedChildCount ?? 0;
+      for (let i = 0; i < count; i++) {
+        const ch = cur.namedChild(i);
+        if (ch) stack.push(ch);
+      }
+    }
+    return out;
+  };
 
   walk(root, (n) => {
     const type = n.type as string;
@@ -519,8 +892,13 @@ function analyzeJsTs(root: any, code: string) {
       }
     }
 
-    // Function declarations
-    if (type === "function_declaration" || type === "method_definition") {
+    // Function declarations with return type extraction
+    if (
+      type === "function_declaration" ||
+      type === "method_definition" ||
+      type === "arrow_function" ||
+      type === "function_expression"
+    ) {
       const nameNode = n.childForFieldName?.("name") || n.child(1);
       const name = nameNode?.text ?? "anonymous";
       findings.functions.push({
@@ -550,6 +928,22 @@ function analyzeJsTs(root: any, code: string) {
         start: n.startPosition.row + 1,
         end: n.endPosition.row + 1,
       });
+      // Lineage: writes and derives within enclosing function
+      const key = enclosingFunctionKey(n);
+      if (key) {
+        const ctx = getCtx(key);
+        ctx.writes.add(name);
+        const init =
+          n.childForFieldName?.("value") ||
+          n.namedChildren?.find((c: any) => c.type !== "identifier");
+        if (init) {
+          const sources = collectIdentifiers(init).filter((s) => s !== name);
+          for (const s of sources) ctx.reads.add(s);
+          if (sources.length) {
+            ctx.derives.push({ target: name, sources });
+          }
+        }
+      }
     }
 
     // Calls (very rough: identifier followed by call)
@@ -557,6 +951,40 @@ function analyzeJsTs(root: any, code: string) {
       const fnNode = n.childForFieldName?.("function") || n.child(0);
       const fnText = fnNode?.text ?? "";
       if (fnText) findings.calls.push(fnText);
+
+      // Lineage: PASSES_TO mapping and argument reads
+      const key = enclosingFunctionKey(n);
+      if (key) {
+        const ctx = getCtx(key);
+        // Determine callee name (prefer identifier or member prop)
+        let callee = "";
+        if (fnNode?.type === "identifier") {
+          callee = fnNode.text;
+        } else if (fnNode?.type === "member_expression") {
+          const prop =
+            fnNode.childForFieldName?.("property") || fnNode.child?.(2);
+          callee = prop?.text ?? "";
+        }
+        const args =
+          n.childForFieldName?.("arguments") ||
+          n.namedChildren?.find((c: any) => c.type === "arguments") ||
+          n.child?.(1);
+        const argNodes = args?.namedChildren ?? [];
+        for (let i = 0; i < argNodes.length; i++) {
+          const a = argNodes[i];
+          // Only track simple identifier args for now
+          if (a.type === "identifier" && callee) {
+            const src = a.text;
+            ctx.reads.add(src);
+            ctx.passesTo.push({ callee, argIndex: i, sourceVar: src });
+          } else {
+            // Collect identifiers inside complex args as reads
+            for (const id of collectIdentifiers(a)) {
+              ctx.reads.add(id);
+            }
+          }
+        }
+      }
 
       // Enhanced HTTP client detection (consumed API)
       if (isHTTPClientCall(fnText)) {
@@ -571,6 +999,32 @@ function analyzeJsTs(root: any, code: string) {
           // Extract method from function name if not already detected
           const method = extractMethodFromFunctionName(fnText);
           findings.consumed.push({ url: cleaned, method });
+        }
+      }
+    }
+
+    // Assignment expressions: track reads/writes/derives
+    if (type === "assignment_expression") {
+      const left = n.childForFieldName?.("left") || n.child?.(0);
+      const right = n.childForFieldName?.("right") || n.child?.(2);
+      const key = enclosingFunctionKey(n);
+      if (key) {
+        const ctx = getCtx(key);
+        if (left?.type === "identifier") {
+          const target = left.text;
+          ctx.writes.add(target);
+          if (right) {
+            const sources = collectIdentifiers(right).filter(
+              (s) => s !== target
+            );
+            for (const s of sources) ctx.reads.add(s);
+            if (sources.length) {
+              ctx.derives.push({ target, sources });
+            }
+          }
+        } else if (right) {
+          // Still collect reads on RHS
+          for (const s of collectIdentifiers(right)) ctx.reads.add(s);
         }
       }
     }
@@ -784,9 +1238,32 @@ function analyzeJavaLike(root: any, code: string) {
     provided: [] as { method: string; path: string }[],
     configs: [] as string[],
     tables: [] as { name: string }[],
+    columns: [] as { table: string; column: string }[],
     errors: [] as { message: string; line: number }[],
     calls: [] as string[],
     testFramework: undefined as string | undefined,
+    springRepositories: [] as {
+      name: string;
+      entityType?: string;
+      idType?: string;
+      baseInterface?: string;
+      methods: {
+        name: string;
+        query?: string;
+        nativeQuery?: boolean;
+        derivedQuery?: boolean;
+      }[];
+      start: number;
+      end: number;
+    }[],
+    securityComponents: [] as {
+      name: string;
+      componentType?: string;
+      annotations: string[];
+      configuredPaths: string[];
+      start: number;
+      end: number;
+    }[],
   };
 
   // Helpers
@@ -958,9 +1435,13 @@ function analyzeJavaLike(root: any, code: string) {
     return null;
   }
 
-  // Consumed API detection (RestTemplate, WebClient)
+  // Single AST traversal to collect all Java-like findings
+  // (prevents multiple full tree walks that can cause infinite loops)
   walk(root, (n) => {
-    if (n.type === "method_invocation") {
+    const type = n.type as string;
+
+    // Method invocations - for consumed APIs and errors
+    if (type === "method_invocation") {
       const methodName = n.child(2)?.text ?? "";
       const targetObj = n.child(0)?.text ?? "";
 
@@ -1045,12 +1526,8 @@ function analyzeJavaLike(root: any, code: string) {
         });
       }
     }
-  });
 
-  // Classes, functions, and provided APIs (Spring MVC annotations)
-  walk(root, (n) => {
-    const type = n.type as string;
-
+    // Class declarations
     if (type === "class_declaration") {
       const nameNode = n.childForFieldName?.("name") || n.child(1);
       const name = nameNode?.text ?? "Class";
@@ -1061,6 +1538,7 @@ function analyzeJavaLike(root: any, code: string) {
       });
     }
 
+    // Method declarations - for functions and provided APIs
     if (type === "method_declaration") {
       const nameNode = n.childForFieldName?.("name") || n.child(1);
       const name = nameNode?.text ?? "method";
@@ -1139,6 +1617,48 @@ export async function extractEntities(
     // Create a Repository entity for each repository
     entities.push(makeRepositoryEntity(repo.repoRoot));
 
+    // Extract developer and team analytics for this repository
+    logger.info(
+      `Extracting developer analytics for repository: ${repo.repoRoot}`
+    );
+
+    try {
+      // Extract developers and commits from git history
+      const { developers, commits } = extractDevelopersFromGit(repo.repoRoot);
+      entities.push(...developers);
+      entities.push(...commits);
+
+      // Extract team information from various sources
+      const codeownersTeams = extractTeamFromCodeowners(repo.repoRoot);
+      entities.push(...codeownersTeams);
+
+      const metadataTeams = extractTeamFromMetadata(repo.repoRoot);
+      entities.push(...metadataTeams);
+
+      // Infer team from repository structure if no explicit teams found
+      if (codeownersTeams.length === 0 && metadataTeams.length === 0) {
+        const inferredTeam = inferTeamFromRepoStructure(repo.repoRoot);
+        if (inferredTeam) {
+          entities.push(inferredTeam);
+        }
+      }
+
+      logger.info(
+        `Extracted ${developers.length} developers, ${
+          commits.length
+        } commits, and ${
+          codeownersTeams.length + metadataTeams.length
+        } teams from ${repo.repoRoot}`
+      );
+    } catch (error) {
+      logger.warn(
+        `Failed to extract developer analytics for ${repo.repoRoot}`,
+        {
+          error: (error as Error).message,
+        }
+      );
+    }
+
     for (const f of repo.files) {
       try {
         // Always create a File entity
@@ -1185,7 +1705,78 @@ export async function extractEntities(
           );
         }
 
-        // Emit functions
+        // Extract TypeScript/JavaScript type definitions if applicable
+        if (f.language === "typescript" || f.language === "javascript") {
+          const typeDefinitions = extractTSTypeDefinitions(
+            root,
+            f.content,
+            repo.repoRoot,
+            f.relPath
+          );
+          for (const typeDef of typeDefinitions) {
+            const typeEntity: TypeDefinitionEntity = {
+              id: stableId([
+                repo.repoRoot,
+                "TypeDefinition",
+                f.relPath,
+                typeDef.name,
+                String(typeDef.span?.startLine || 0),
+              ]),
+              type: "TypeDefinition",
+              name: typeDef.name,
+              kind: typeDef.kind,
+              properties: typeDef.properties,
+              values: typeDef.values,
+              definition: typeDef.definition,
+              repoRoot: repo.repoRoot,
+              file: f.relPath,
+              language: f.language,
+              span: typeDef.span,
+            };
+            entities.push(typeEntity);
+          }
+        }
+
+        // Extract class fields for schema generation
+        const classEntities: ClassEntity[] = [];
+        for (const c of (res as any).classes) {
+          const classEntity = makeClassEntity(
+            repo.repoRoot,
+            f.relPath,
+            f.language,
+            c.name,
+            c.start,
+            c.end
+          );
+
+          // Extract class fields using tree-sitter
+          const classNode = findNodeAtPosition(root, c.start, c.end, "class");
+          if (classNode) {
+            const fields = extractClassFields(classNode, f.language);
+            classEntity.fields = fields;
+          }
+
+          entities.push(classEntity);
+          classEntities.push(classEntity);
+        }
+
+        // Emit functions with return type extraction
+        const fnCtxMap = (res as any).functionContexts as
+          | Record<
+              string,
+              {
+                reads: Set<string>;
+                writes: Set<string>;
+                derives: { target: string; sources: string[]; op?: string }[];
+                passesTo: {
+                  callee: string;
+                  argIndex: number;
+                  sourceVar: string;
+                  paramName?: string;
+                }[];
+              }
+            >
+          | undefined;
         const fileFuncNames: string[] = [];
         for (const fn of (res as any).functions) {
           const func = makeFunctionEntity(
@@ -1196,6 +1787,48 @@ export async function extractEntities(
             fn.start,
             fn.end
           );
+
+          // Extract return type and parameters
+          const fnNode = findNodeAtPosition(root, fn.start, fn.end, "function");
+          if (fnNode) {
+            // Extract return type based on language
+            if (f.language === "typescript" || f.language === "javascript") {
+              const returnInfo = extractTSReturnType(fnNode, f.content);
+              func.returns = returnInfo.returnType;
+              func.isAsync = returnInfo.isAsync;
+              func.returnsSchema = returnInfo.schema;
+            } else if (f.language === "python") {
+              const returnInfo = extractPythonReturnType(fnNode, f.content);
+              func.returns = returnInfo.returnType;
+              func.isAsync = returnInfo.isAsync;
+            } else if (f.language === "java") {
+              const returnInfo = extractJavaReturnType(fnNode);
+              func.returns = returnInfo.returnType;
+              func.isAsync = returnInfo.isAsync;
+
+              // For Spring controller methods, extract response schema
+              if (returnInfo.returnType && isControllerMethod(fnNode)) {
+                const schemaInfo = extractSpringResponseSchema(
+                  fnNode,
+                  classEntities
+                );
+                if (schemaInfo.schema) {
+                  func.returnsSchema = schemaInfo.schema;
+                }
+              }
+            } else if (f.language === "csharp") {
+              const returnInfo = extractCSharpReturnType(fnNode);
+              func.returns = returnInfo.returnType;
+              func.isAsync = returnInfo.isAsync;
+            }
+
+            // Extract parameter types
+            const paramTypes = extractParameterTypes(fnNode, f.language);
+            if (paramTypes.length > 0) {
+              func.paramTypes = paramTypes;
+            }
+          }
+
           // attach heuristic relationships on function meta for later relationship building
           (func as FunctionEntity).calls = (res as any).calls ?? [];
           (func as FunctionEntity).apisProvided = (res as any).provided ?? [];
@@ -1203,6 +1836,18 @@ export async function extractEntities(
           (func as FunctionEntity).tablesQueried =
             (res as any).tables?.map((t: any) => t.name) ?? [];
           (func as FunctionEntity).configsUsed = (res as any).configs ?? [];
+
+          // Data lineage: attach reads/writes/derives/passesTo if available
+          if (fnCtxMap) {
+            const key = `${fn.name}:${fn.start}-${fn.end}`;
+            const ctx = fnCtxMap[key];
+            if (ctx) {
+              (func as FunctionEntity).reads = Array.from(ctx.reads);
+              (func as FunctionEntity).writes = Array.from(ctx.writes);
+              (func as FunctionEntity).derives = ctx.derives;
+              (func as FunctionEntity).passesTo = ctx.passesTo;
+            }
+          }
 
           entities.push(func);
           fileFuncNames.push(fn.name);
@@ -1294,6 +1939,67 @@ export async function extractEntities(
         // Here we emit only tables if any were heuristically found (none by default).
         for (const t of (res as any).tables ?? []) {
           entities.push(makeTable(repo.repoRoot, f.relPath, t.name));
+        }
+
+        // Spring-specific processing for Java files (already handled in analyzeJavaLike)
+        if (f.language === "java") {
+          // Spring processing is now integrated into the main Java analysis
+          // to prevent additional tree walks that could cause infinite loops
+          const springResults = (res as any).springRepositories ?? [];
+          const securityComponents = (res as any).securityComponents ?? [];
+
+          for (const springRepo of springResults) {
+            // Add Spring Data Repository entities
+            entities.push({
+              id: stableId([
+                repo.repoRoot,
+                "SpringDataRepository",
+                f.relPath,
+                springRepo.name,
+                String(springRepo.start),
+              ]),
+              type: "SpringDataRepository" as const,
+              name: springRepo.name,
+              entityType: springRepo.entityType,
+              idType: springRepo.idType,
+              baseInterface: springRepo.baseInterface,
+              customQueries:
+                springRepo.methods?.map((method: any) => ({
+                  methodName: method.name,
+                  query: method.query,
+                  nativeQuery: method.nativeQuery,
+                  derivedQuery: method.derivedQuery,
+                  returnType: undefined, // Could be enhanced later
+                })) || [],
+              repoRoot: repo.repoRoot,
+              file: f.relPath,
+              span: { startLine: springRepo.start, endLine: springRepo.end },
+            });
+          }
+
+          for (const securityComponent of securityComponents) {
+            // Add Spring Security components
+            entities.push({
+              id: stableId([
+                repo.repoRoot,
+                "SecurityComponent",
+                f.relPath,
+                securityComponent.name,
+                String(securityComponent.start),
+              ]),
+              type: "SecurityComponent" as const,
+              name: securityComponent.name,
+              componentType: securityComponent.componentType,
+              securityAnnotations: securityComponent.annotations,
+              configuredPaths: securityComponent.configuredPaths,
+              repoRoot: repo.repoRoot,
+              file: f.relPath,
+              span: {
+                startLine: securityComponent.start,
+                endLine: securityComponent.end,
+              },
+            });
+          }
         }
       } catch (e) {
         logger.warn(`AST extraction failed for ${f.relPath}`, {

@@ -1,14 +1,37 @@
-
-# Node.js standard ignores
+# Node modules
 node_modules/
-dist/
+
+# Build output
 build/
-coverage/
-.env
-.env.*
+dist/
+out/
+
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-pnpm-debug.log*
+
+# Environment files
+.env
+
+# OS files
 .DS_Store
+
+# IDE files
 .vscode/
+.idea/
+
+# TypeScript
+*.tsbuildinfo
+
+# Zip files
+*.zip
+
+# Coverage
+coverage/
+
+# Misc
+*.log
+
+#git
+git.md

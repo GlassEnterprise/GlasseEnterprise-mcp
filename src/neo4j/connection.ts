@@ -8,6 +8,49 @@ export interface Neo4jConfig {
 }
 
 let driverSingleton: Driver | null = null;
+let schemaInitialized = false;
+
+/**
+ * Initialize Neo4j schema: ensure unique constraints and helpful indexes.
+ * Auto-runs on first successful connection.
+ */
+async function initSchema(driver: Driver): Promise<void> {
+  const session = driver.session({ database: "neo4j" });
+  try {
+    const labels = [
+      "Repository",
+      "File",
+      "Class",
+      "Function",
+      "Variable",
+      "API",
+      "Package",
+      "DatabaseTable",
+      "DatabaseColumn",
+      "Config",
+      "Test",
+      "ErrorMessage",
+    ];
+    for (const label of labels) {
+      // Ensure 'id' uniqueness per label
+      await session.run(
+        `CREATE CONSTRAINT IF NOT EXISTS FOR (n:${label}) REQUIRE n.id IS UNIQUE`
+      );
+    }
+    // Optional: lightweight indexes for common lookups (non-unique)
+    await session.run(
+      "CREATE INDEX api_name IF NOT EXISTS FOR (n:API) ON (n.name)"
+    );
+    await session.run(
+      "CREATE INDEX func_name IF NOT EXISTS FOR (n:Function) ON (n.name)"
+    );
+    await session.run(
+      "CREATE INDEX file_path IF NOT EXISTS FOR (n:File) ON (n.file)"
+    );
+  } finally {
+    await session.close();
+  }
+}
 
 /**
  * Ensure a standard Bolt port is present when missing.
@@ -85,10 +128,35 @@ async function tryConnect(
   auth: any,
   database?: string
 ): Promise<Driver> {
-  const driver = neo4j.driver(uri, auth, {
+  // Configure driver options with proper SSL/TLS settings
+  const driverConfig: any = {
     connectionTimeout: Number(process.env.NEO4J_CONNECTION_TIMEOUT_MS) || 8000,
     maxConnectionPoolSize: Number(process.env.NEO4J_MAX_POOL_SIZE) || 50,
-  });
+  };
+
+  // Handle SSL/TLS configuration - convert URL scheme to config-based approach
+  let connectionUri = uri;
+  if (uri.includes("+s") || uri.includes("bolt+s") || uri.includes("neo4j+s")) {
+    // Remove encryption from URL and configure it via driver config instead
+    connectionUri = uri
+      .replace(/bolt\+s:\/\//, "bolt://")
+      .replace(/neo4j\+s:\/\//, "bolt://")
+      .replace(/bolt\+ssc:\/\//, "bolt://")
+      .replace(/neo4j\+ssc:\/\//, "bolt://");
+
+    driverConfig.encrypted = "ENCRYPTION_ON";
+
+    // For Neo4j Aura and other hosted instances, trust all certificates
+    // This is safe for Neo4j Aura as it uses valid certificates from trusted CAs
+    if (process.env.NEO4J_TRUST_ALL_CERTIFICATES === "true") {
+      driverConfig.trust = "TRUST_ALL_CERTIFICATES";
+    } else {
+      // Default to trusting system CA signed certificates
+      driverConfig.trust = "TRUST_SYSTEM_CA_SIGNED_CERTIFICATES";
+    }
+  }
+
+  const driver = neo4j.driver(connectionUri, auth, driverConfig);
   const session = driver.session({ database: database || "neo4j" });
   try {
     await session.run(
@@ -108,6 +176,10 @@ async function tryConnect(
 
 export async function getDriver(config: Neo4jConfig): Promise<Driver> {
   if (driverSingleton) {
+    if (!schemaInitialized) {
+      await initSchema(driverSingleton);
+      schemaInitialized = true;
+    }
     return driverSingleton;
   }
 
@@ -146,6 +218,10 @@ export async function getDriver(config: Neo4jConfig): Promise<Driver> {
     try {
       const drv = await tryConnect(uri, auth, config.database);
       driverSingleton = drv;
+      if (!schemaInitialized) {
+        await initSchema(driverSingleton);
+        schemaInitialized = true;
+      }
       return driverSingleton;
     } catch (e: any) {
       lastError = e;

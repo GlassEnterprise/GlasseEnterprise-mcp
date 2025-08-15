@@ -30,7 +30,13 @@ export type EntityType =
   | "DatabaseColumn"
   | "Config"
   | "Test"
-  | "ErrorMessage";
+  | "ErrorMessage"
+  | "SpringDataRepository"
+  | "SecurityComponent"
+  | "TypeDefinition"
+  | "Developer"
+  | "Team"
+  | "Commit";
 
 export interface EntityBase {
   id: string; // globally unique stable id
@@ -53,24 +59,57 @@ export interface FileEntity extends EntityBase {
 export interface ClassEntity extends EntityBase {
   type: "Class";
   name: string;
+  // Enhanced with field/property information for schema extraction
+  fields?: {
+    name: string;
+    type?: string;
+    visibility?: string;
+    annotations?: string[];
+  }[];
+  methods?: {
+    name: string;
+    returnType?: string;
+    parameters?: { name: string; type?: string }[];
+  }[];
 }
 
 export interface FunctionEntity extends EntityBase {
   type: "Function";
   name: string;
   params?: string[];
-  returns?: string;
+  paramTypes?: { name: string; type?: string }[]; // Enhanced parameter types
+  returns?: string; // Return type
+  returnsSchema?: object; // Detailed return schema for complex types
+  isAsync?: boolean; // Whether the function is async/returns a Promise
   // relationships (by name) for convenience; relationshipBuilder will convert to edges
   calls?: string[]; // function names
   apisProvided?: { method: string; path: string }[];
   apisUsed?: { method?: string; url: string }[];
   tablesQueried?: string[];
   configsUsed?: string[];
+  // Data lineage metadata (per function)
+  reads?: string[]; // variable names read within this function
+  writes?: string[]; // variable names written within this function
+  derives?: { target: string; sources: string[]; op?: string }[]; // new var derived from sources
+  passesTo?: {
+    callee: string;
+    argIndex: number;
+    sourceVar: string;
+    paramName?: string;
+  }[]; // var passed to callee
+  // Spring Data specific
+  queryAnnotations?: { query: string; nativeQuery?: boolean }[];
+  springDataOperation?: {
+    operation: string; // find, delete, count, exists, etc.
+    entity?: string;
+    fields?: string[];
+  };
 }
 
 export interface VariableEntity extends EntityBase {
   type: "Variable";
   name: string;
+  dataType?: string; // Variable type if available
 }
 
 export interface APIEntity extends EntityBase {
@@ -81,6 +120,34 @@ export interface APIEntity extends EntityBase {
   url?: string;
   direction: "provided" | "consumed";
   isCorrectlyClassified?: boolean; // Flag for classification correction
+  // Enhanced schema information
+  responseType?: string; // The return type of the API endpoint
+  responseSchema?: object; // Detailed schema of the response
+  requestSchema?: object; // Schema of the request body
+  queryParams?: { name: string; type?: string; required?: boolean }[];
+  pathParams?: { name: string; type?: string }[];
+  headers?: { name: string; type?: string; required?: boolean }[];
+}
+
+export interface TypeDefinitionEntity extends EntityBase {
+  type: "TypeDefinition";
+  name: string; // Type/Interface/Class name
+  kind: "interface" | "type" | "class" | "enum"; // Type of definition
+  definition?: object; // The actual type definition structure
+  // For interfaces and classes
+  properties?: {
+    name: string;
+    type?: string;
+    optional?: boolean;
+    visibility?: string;
+  }[];
+  // For enums
+  values?: string[];
+  // Generic type parameters
+  typeParams?: string[];
+  // What it extends/implements
+  extends?: string[];
+  implements?: string[];
 }
 
 export interface PackageEntity extends EntityBase {
@@ -94,12 +161,16 @@ export interface PackageEntity extends EntityBase {
 export interface DatabaseTableEntity extends EntityBase {
   type: "DatabaseTable";
   name: string; // table name
+  schema?: string; // optional schema name
+  entityClass?: string; // associated JPA entity class name
 }
 
 export interface DatabaseColumnEntity extends EntityBase {
   type: "DatabaseColumn";
   name: string; // column name
   table: string; // parent table name
+  dataType?: string; // column data type if known
+  entityField?: string; // associated entity field name
 }
 
 export interface ConfigEntity extends EntityBase {
@@ -126,6 +197,71 @@ export interface ErrorMessageEntity extends EntityBase {
   message: string;
 }
 
+export interface SpringDataRepositoryEntity extends EntityBase {
+  type: "SpringDataRepository";
+  name: string; // repository interface name
+  entityType?: string; // entity type from generic parameter
+  idType?: string; // ID type from generic parameter
+  baseInterface?: string; // JpaRepository, CrudRepository, etc.
+  customQueries?: {
+    methodName: string;
+    query?: string;
+    nativeQuery?: boolean;
+    derivedQuery?: boolean;
+    returnType?: string; // Return type of the query method
+  }[];
+}
+
+export interface SecurityComponentEntity extends EntityBase {
+  type: "SecurityComponent";
+  name: string;
+  componentType?:
+    | "AuthenticationManager"
+    | "UserDetailsService"
+    | "SecurityConfig"
+    | "SecurityFilter";
+  securityAnnotations?: string[];
+  configuredPaths?: string[];
+}
+
+export interface DeveloperEntity extends EntityBase {
+  type: "Developer";
+  name: string; // Full name of the developer
+  email?: string; // Primary email address
+  username?: string; // Git username or handle
+  aliases?: string[]; // Alternative names/emails used
+  primaryLanguages?: string[]; // Languages they work with most
+  totalCommits?: number; // Total commit count across all repos
+  firstCommit?: string; // ISO date of first commit
+  lastCommit?: string; // ISO date of last commit
+  teamId?: string; // Reference to team they belong to
+}
+
+export interface TeamEntity extends EntityBase {
+  type: "Team";
+  name: string; // Team name
+  description?: string; // Team description
+  lead?: string; // Team lead/manager
+  size?: number; // Number of team members
+  repositories?: string[]; // Repository IDs owned by team
+  expertise?: string[]; // Technologies/domains the team specializes in
+}
+
+export interface CommitEntity extends EntityBase {
+  type: "Commit";
+  name: string; // Commit message (first line)
+  hash: string; // Full commit hash
+  shortHash?: string; // Short commit hash
+  message?: string; // Full commit message
+  author?: string; // Author name
+  authorEmail?: string; // Author email
+  timestamp?: string; // ISO timestamp
+  additions?: number; // Lines added
+  deletions?: number; // Lines deleted
+  filesChanged?: string[]; // List of files modified
+  parentHashes?: string[]; // Parent commit hashes
+}
+
 export type AnyEntity =
   | RepositoryEntity
   | FileEntity
@@ -139,6 +275,12 @@ export type AnyEntity =
   | ConfigEntity
   | TestEntity
   | ErrorMessageEntity
+  | SpringDataRepositoryEntity
+  | SecurityComponentEntity
+  | TypeDefinitionEntity
+  | DeveloperEntity
+  | TeamEntity
+  | CommitEntity
   | EntityBase;
 
 export type RelationshipType =
@@ -157,7 +299,45 @@ export type RelationshipType =
   | "REPO_USES_API"
   | "CONSUMES_API_FROM"
   | "REPO_DEPENDS_ON_PACKAGE"
-  | "SHARES_PACKAGE_WITH";
+  | "SHARES_PACKAGE_WITH"
+  // Data lineage relationships
+  | "READS_FROM"
+  | "WRITES_TO"
+  | "TRANSFORMS"
+  | "PASSES_TO"
+  | "DERIVES_FROM"
+  | "DEPENDS_ON"
+  // Spring Data relationships
+  | "REPOSITORY_FOR_ENTITY"
+  | "REPOSITORY_QUERIES_TABLE"
+  | "REPOSITORY_HAS_METHOD"
+  // Spring Security relationships
+  | "SECURED_BY"
+  | "AUTHENTICATES"
+  | "PROVIDES_USER_DETAILS"
+  | "USES_SECURITY_FILTER"
+  // Additional Spring relationships
+  | "ACCESSES_TABLE"
+  | "QUERIES_COLUMN"
+  | "SECURES_API"
+  | "USED_BY"
+  // Type and schema relationships
+  | "RETURNS_TYPE"
+  | "USES_TYPE"
+  | "IMPLEMENTS_TYPE"
+  | "API_RETURNS_TYPE"
+  | "API_ACCEPTS_TYPE"
+  // Developer and Team relationships
+  | "BELONGS_TO"
+  | "CONTRIBUTED_TO"
+  | "OWNS_REPOSITORY"
+  | "COMMITTED"
+  | "CONTAINS_COMMIT"
+  | "MODIFIED_FILE"
+  | "COLLABORATES_WITH"
+  | "AUTHORED_BY"
+  | "MANAGES_TEAM"
+  | "HAS_MEMBER";
 
 export interface Relationship {
   id: string;
