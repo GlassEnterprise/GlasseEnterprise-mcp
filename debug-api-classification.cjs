@@ -3,7 +3,7 @@ const path = require("path");
 
 // Test a specific file to see the AST classification
 const testFile =
-  "/workspace/mcp test/ReactJS-Spring-Boot-Full-Stack-App/react-frontend/src/api/HomeService.js";
+  "/Users/ahman/Desktop/workspace/mcp test/ReactJS-Spring-Boot-Full-Stack-App/react-frontend/src/api/HomeService.js";
 
 console.log("=== TESTING API CLASSIFICATION ===");
 console.log(`File: ${testFile}`);

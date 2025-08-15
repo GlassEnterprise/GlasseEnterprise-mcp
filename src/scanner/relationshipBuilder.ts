@@ -5,12 +5,19 @@ import {
   FunctionEntity,
   APIEntity,
   DatabaseTableEntity,
+  DatabaseColumnEntity,
   ConfigEntity,
   ErrorMessageEntity,
   ClassEntity,
   FileEntity,
   RepositoryEntity,
   PackageEntity,
+  VariableEntity,
+  SpringDataRepositoryEntity,
+  SecurityComponentEntity,
+  DeveloperEntity,
+  TeamEntity,
+  CommitEntity,
 } from "./types.js";
 
 /**
@@ -44,6 +51,23 @@ export function buildRelationships(entities: AnyEntity[]): Relationship[] {
   const packages = entities.filter(
     (e) => e.type === "Package"
   ) as PackageEntity[];
+  const variables = entities.filter(
+    (e) => e.type === "Variable"
+  ) as VariableEntity[];
+  const springRepos = entities.filter(
+    (e) => e.type === "SpringDataRepository"
+  ) as SpringDataRepositoryEntity[];
+  const securityComponents = entities.filter(
+    (e) => e.type === "SecurityComponent"
+  ) as SecurityComponentEntity[];
+  const columns = entities.filter(
+    (e) => e.type === "DatabaseColumn"
+  ) as DatabaseColumnEntity[];
+  const developers = entities.filter(
+    (e) => e.type === "Developer"
+  ) as DeveloperEntity[];
+  const teams = entities.filter((e) => e.type === "Team") as TeamEntity[];
+  const commits = entities.filter((e) => e.type === "Commit") as CommitEntity[];
 
   // Index helpers
   const byFile = new Map<string, AnyEntity[]>();
@@ -175,6 +199,88 @@ export function buildRelationships(entities: AnyEntity[]): Relationship[] {
     }
   }
 
+  // Data lineage edges
+  // Index variables by (repoRoot|file)
+  const varsByFile = new Map<string, VariableEntity[]>();
+  for (const v of variables) {
+    const key = `${v.repoRoot}|${v.file}`;
+    const arr = varsByFile.get(key) ?? [];
+    arr.push(v);
+    varsByFile.set(key, arr);
+  }
+
+  function findVarsInFunction(
+    fn: FunctionEntity,
+    varName: string
+  ): VariableEntity[] {
+    const list = varsByFile.get(`${fn.repoRoot}|${fn.file}`) ?? [];
+    // Prefer variables declared within the function span
+    const inSpan = list.filter(
+      (v) =>
+        v.name === varName &&
+        v.span &&
+        fn.span &&
+        v.span.startLine >= fn.span.startLine &&
+        v.span.endLine <= fn.span.endLine
+    );
+    if (inSpan.length) return inSpan;
+    // fallback to variables of same name in file
+    return list.filter((v) => v.name === varName);
+  }
+
+  // READS_FROM and WRITES_TO
+  for (const fn of functions) {
+    for (const varName of fn.reads ?? []) {
+      const targets = findVarsInFunction(fn, varName);
+      for (const v of targets) {
+        rels.push(makeRel("READS_FROM", fn.id, v.id));
+      }
+    }
+    for (const varName of fn.writes ?? []) {
+      const targets = findVarsInFunction(fn, varName);
+      for (const v of targets) {
+        rels.push(makeRel("WRITES_TO", fn.id, v.id));
+      }
+    }
+
+    // TRANSFORMS and DERIVES_FROM
+    for (const d of fn.derives ?? []) {
+      const targets = findVarsInFunction(fn, d.target);
+      for (const t of targets) {
+        const tr = makeRel("TRANSFORMS", fn.id, t.id);
+        tr.properties = {
+          sources: d.sources ?? [],
+          ...(d.op ? { op: d.op } : {}),
+        };
+        rels.push(tr);
+
+        for (const sName of d.sources ?? []) {
+          const sources = findVarsInFunction(fn, sName);
+          for (const s of sources) {
+            rels.push(makeRel("DERIVES_FROM", t.id, s.id));
+          }
+        }
+      }
+    }
+
+    // PASSES_TO: variable -> callee function
+    for (const p of fn.passesTo ?? []) {
+      const vars = findVarsInFunction(fn, p.sourceVar);
+      const key = `${fn.repoRoot}|${p.callee}`;
+      const targetFns = fnByNameByRepo.get(key) ?? [];
+      for (const v of vars) {
+        for (const targetId of targetFns) {
+          const r = makeRel("PASSES_TO", v.id, targetId);
+          r.properties = {
+            argIndex: p.argIndex ?? null,
+            paramName: p.paramName ?? null,
+          };
+          rels.push(r);
+        }
+      }
+    }
+  }
+
   // Function -> ErrorMessage (EMITS_ERROR) if error line within function span
   const errorsByFile = new Map<string, ErrorMessageEntity[]>();
   for (const e of errors) {
@@ -246,11 +352,89 @@ export function buildRelationships(entities: AnyEntity[]): Relationship[] {
     }
   }
 
+  // Spring Data Repository relationships
+  for (const repo of springRepos) {
+    // SpringDataRepository -> DatabaseTable (ACCESSES_TABLE)
+    if (repo.entityType) {
+      const tableName = repo.entityType.toLowerCase() + "s";
+      const matchingTables = tables.filter(
+        (t) => t.repoRoot === repo.repoRoot && t.name === tableName
+      );
+      for (const table of matchingTables) {
+        rels.push(makeRel("ACCESSES_TABLE", repo.id, table.id));
+      }
+    }
+
+    // SpringDataRepository -> DatabaseColumn (QUERIES_COLUMN)
+    const repoColumns = columns.filter(
+      (c) => c.repoRoot === repo.repoRoot && c.file === repo.file
+    );
+    for (const col of repoColumns) {
+      rels.push(makeRel("QUERIES_COLUMN", repo.id, col.id));
+    }
+  }
+
+  // DatabaseTable -> DatabaseColumn (HAS_COLUMN)
+  for (const col of columns) {
+    const matchingTables = tables.filter(
+      (t) => t.repoRoot === col.repoRoot && t.name === col.table
+    );
+    for (const table of matchingTables) {
+      rels.push(makeRel("HAS_COLUMN", table.id, col.id));
+    }
+  }
+
+  // SecurityComponent -> API relationships (SECURES_API)
+  for (const sec of securityComponents) {
+    if (sec.componentType === "SecurityConfig" && sec.configuredPaths) {
+      // Match configured paths with API endpoints
+      const repoApis = apis.filter(
+        (a) => a.repoRoot === sec.repoRoot && a.direction === "provided"
+      );
+
+      for (const api of repoApis) {
+        const apiPath = api.path || "";
+        // Check if any configured path pattern matches this API
+        for (const pattern of sec.configuredPaths) {
+          if (pathMatchesPattern(apiPath, pattern)) {
+            const rel = makeRel("SECURES_API", sec.id, api.id);
+            rel.properties = { pattern };
+            rels.push(rel);
+            break; // Only need one match per API
+          }
+        }
+      }
+    }
+
+    // SecurityComponent -> Class relationships for UserDetailsService
+    if (sec.componentType === "UserDetailsService") {
+      // Link to controllers/classes that might use it
+      const repoClasses = classes.filter((c) => c.repoRoot === sec.repoRoot);
+      for (const cls of repoClasses) {
+        // Check if class name suggests it's a controller
+        if (cls.name.includes("Controller") || cls.name.includes("Service")) {
+          rels.push(makeRel("USED_BY", sec.id, cls.id));
+        }
+      }
+    }
+  }
+
   // Cross-repository API relationships
   const repositories = entities.filter(
     (e) => e.type === "Repository"
   ) as RepositoryEntity[];
   rels.push(...buildCrossRepositoryAPIRelationships(repositories, apis));
+
+  // Developer and Team relationships
+  rels.push(
+    ...buildDeveloperTeamRelationships(
+      developers,
+      teams,
+      commits,
+      repositories,
+      files
+    )
+  );
 
   return dedupeRelationships(rels);
 }
@@ -492,6 +676,233 @@ function calculateAPIMatchConfidence(
   if (pathLength > 20) confidence += 0.1;
 
   return Math.max(0, Math.min(1, confidence));
+}
+
+/**
+ * Check if an API path matches a Spring Security pattern
+ * Supports patterns like /api/**, /api/admin/*, etc.
+ */
+function pathMatchesPattern(apiPath: string, pattern: string): boolean {
+  if (!apiPath || !pattern) return false;
+
+  // Normalize paths
+  const normalizedPath = normalizeAPIPath(apiPath);
+  let normalizedPattern = pattern.trim();
+
+  // Convert Spring/Ant-style patterns to regex
+  // ** matches any number of directories
+  // * matches any characters except /
+  normalizedPattern = normalizedPattern
+    .replace(/\*\*/g, ".*") // ** matches anything
+    .replace(/\*/g, "[^/]*") // * matches anything except /
+    .replace(/\//g, "\\/"); // Escape forward slashes
+
+  // Add anchors for exact matching
+  const regex = new RegExp(`^${normalizedPattern}$`);
+
+  return regex.test(normalizedPath);
+}
+
+/**
+ * Build relationships between developers, teams, commits, and repositories
+ */
+function buildDeveloperTeamRelationships(
+  developers: DeveloperEntity[],
+  teams: TeamEntity[],
+  commits: CommitEntity[],
+  repositories: RepositoryEntity[],
+  files: FileEntity[]
+): Relationship[] {
+  const rels: Relationship[] = [];
+
+  // Developer -> Team relationships (BELONGS_TO)
+  // Match developers to teams by repository and team assignment
+  for (const developer of developers) {
+    if (developer.teamId) {
+      // Direct team assignment
+      const team = teams.find(
+        (t) =>
+          t.repoRoot === developer.repoRoot &&
+          (t.id === developer.teamId || t.name === developer.teamId)
+      );
+      if (team) {
+        rels.push(makeRel("BELONGS_TO", developer.id, team.id));
+      }
+    } else {
+      // Infer team membership from repository
+      const repoTeams = teams.filter((t) => t.repoRoot === developer.repoRoot);
+      if (repoTeams.length === 1) {
+        // If there's only one team for this repo, assign developer to it
+        rels.push(makeRel("BELONGS_TO", developer.id, repoTeams[0].id));
+      }
+    }
+  }
+
+  // Team -> Repository relationships (OWNS_REPOSITORY)
+  for (const team of teams) {
+    const repository = repositories.find((r) => r.repoRoot === team.repoRoot);
+    if (repository) {
+      const rel = makeRel("OWNS_REPOSITORY", team.id, repository.id);
+      rel.properties = {
+        since: team.meta?.since || new Date().toISOString(),
+        teamSize: team.size,
+      };
+      rels.push(rel);
+    }
+  }
+
+  // Developer -> Repository relationships (CONTRIBUTED_TO)
+  for (const developer of developers) {
+    const repository = repositories.find(
+      (r) => r.repoRoot === developer.repoRoot
+    );
+    if (repository) {
+      const rel = makeRel("CONTRIBUTED_TO", developer.id, repository.id);
+      rel.properties = {
+        commits: developer.totalCommits || 0,
+        firstCommit: developer.firstCommit,
+        lastCommit: developer.lastCommit,
+        primaryLanguages: developer.primaryLanguages || [],
+      };
+      rels.push(rel);
+    }
+  }
+
+  // Developer -> Commit relationships (COMMITTED)
+  for (const commit of commits) {
+    // Find matching developer by email
+    const developer = developers.find(
+      (d) =>
+        d.repoRoot === commit.repoRoot &&
+        (d.email === commit.authorEmail ||
+          d.aliases?.includes(commit.authorEmail || "") ||
+          d.name === commit.author)
+    );
+
+    if (developer) {
+      const rel = makeRel("COMMITTED", developer.id, commit.id);
+      rel.properties = {
+        timestamp: commit.timestamp,
+        additions: commit.additions,
+        deletions: commit.deletions,
+        filesChanged: commit.filesChanged?.length || 0,
+      };
+      rels.push(rel);
+    }
+  }
+
+  // Repository -> Commit relationships (CONTAINS_COMMIT)
+  for (const commit of commits) {
+    const repository = repositories.find((r) => r.repoRoot === commit.repoRoot);
+    if (repository) {
+      rels.push(makeRel("CONTAINS_COMMIT", repository.id, commit.id));
+    }
+  }
+
+  // Commit -> File relationships (MODIFIED_FILE)
+  for (const commit of commits) {
+    for (const changedFile of commit.filesChanged || []) {
+      const file = files.find(
+        (f) => f.repoRoot === commit.repoRoot && f.file === changedFile
+      );
+      if (file) {
+        const rel = makeRel("MODIFIED_FILE", commit.id, file.id);
+        rel.properties = {
+          timestamp: commit.timestamp,
+        };
+        rels.push(rel);
+      }
+    }
+  }
+
+  // Developer collaboration relationships (COLLABORATES_WITH)
+  // Find developers who worked on the same files
+  const collaborationMap = new Map<string, Set<string>>();
+
+  for (const commit of commits) {
+    const developer = developers.find(
+      (d) =>
+        d.repoRoot === commit.repoRoot &&
+        (d.email === commit.authorEmail ||
+          d.aliases?.includes(commit.authorEmail || "") ||
+          d.name === commit.author)
+    );
+
+    if (developer && commit.filesChanged) {
+      for (const filePath of commit.filesChanged) {
+        const key = `${commit.repoRoot}|${filePath}`;
+        if (!collaborationMap.has(key)) {
+          collaborationMap.set(key, new Set());
+        }
+        collaborationMap.get(key)!.add(developer.id);
+      }
+    }
+  }
+
+  // Create collaboration relationships
+  for (const [, developerIds] of collaborationMap) {
+    const devArray = Array.from(developerIds);
+    for (let i = 0; i < devArray.length; i++) {
+      for (let j = i + 1; j < devArray.length; j++) {
+        const dev1Id = devArray[i];
+        const dev2Id = devArray[j];
+
+        // Create bidirectional collaboration
+        const rel1 = makeRel("COLLABORATES_WITH", dev1Id, dev2Id);
+        const rel2 = makeRel("COLLABORATES_WITH", dev2Id, dev1Id);
+
+        // Count shared files for collaboration strength
+        let sharedFiles = 0;
+        for (const [filePath, collaborators] of collaborationMap) {
+          if (collaborators.has(dev1Id) && collaborators.has(dev2Id)) {
+            sharedFiles++;
+          }
+        }
+
+        rel1.properties = { sharedFiles };
+        rel2.properties = { sharedFiles };
+
+        rels.push(rel1, rel2);
+      }
+    }
+  }
+
+  // Team management relationships (MANAGES_TEAM, HAS_MEMBER)
+  for (const team of teams) {
+    // Team lead relationships
+    if (team.lead) {
+      const leadDeveloper = developers.find(
+        (d) =>
+          d.repoRoot === team.repoRoot &&
+          (d.name === team.lead || d.email === team.lead)
+      );
+      if (leadDeveloper) {
+        rels.push(makeRel("MANAGES_TEAM", leadDeveloper.id, team.id));
+      }
+    }
+
+    // Team membership relationships
+    const teamMembers = developers.filter(
+      (d) =>
+        d.repoRoot === team.repoRoot &&
+        (d.teamId === team.id || d.teamId === team.name)
+    );
+
+    for (const member of teamMembers) {
+      const rel = makeRel("HAS_MEMBER", team.id, member.id);
+      rel.properties = {
+        role:
+          member.id === developers.find((d) => d.name === team.lead)?.id
+            ? "lead"
+            : "member",
+        joinDate: member.firstCommit,
+        contributions: member.totalCommits || 0,
+      };
+      rels.push(rel);
+    }
+  }
+
+  return rels;
 }
 
 function dedupeRelationships(rels: Relationship[]): Relationship[] {

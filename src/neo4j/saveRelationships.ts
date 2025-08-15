@@ -15,7 +15,8 @@ function groupByType(
 
 export async function upsertRelationshipsBatch(
   driver: Driver,
-  relationships: Relationship[]
+  relationships: Relationship[],
+  snapshotVersion?: string
 ): Promise<void> {
   if (!relationships.length) return;
 
@@ -23,14 +24,14 @@ export async function upsertRelationshipsBatch(
   const session = driver.session();
   try {
     for (const [type, rels] of byType.entries()) {
-      // Use plain MERGE with concrete relationship type per batch (avoids APOC dependency)
+      // Versioned relationships: one relationship per (fromId,type,toId,snapshotVersion)
       const query = `
         UNWIND $rows AS row
         MATCH (a {id: row.fromId})
         MATCH (b {id: row.toId})
-        MERGE (a)-[r:${type}]->(b)
+        MERGE (a)-[r:${type} {relKey: row.relKey, snapshotVersion: row.snapshotVersion}]->(b)
         ON CREATE SET r.createdAt = timestamp()
-        ON MATCH SET r.updatedAt = timestamp()
+        SET r.updatedAt = timestamp()
         WITH r, row
         CALL {
           WITH r, row
@@ -44,6 +45,8 @@ export async function upsertRelationshipsBatch(
       const rows = rels.map((r) => ({
         fromId: r.fromId,
         toId: r.toId,
+        relKey: `${r.fromId}|${type}|${r.toId}`,
+        snapshotVersion: snapshotVersion ?? null,
         properties: r.properties ?? {},
       }));
       await session.run(query, { rows });

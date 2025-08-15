@@ -1,6 +1,6 @@
-## 🚀 Using the GlasseEnterprise - MCP Tools
+## 🚀 Using the MCP Tools
 
-Once configured, you can use these 5 tools in Cline:
+Once configured, you can use these 4 tools in Cline:
 
 ### 1. **scan** - Analyze Repository
 
@@ -48,30 +48,11 @@ No parameters needed
 
 Example: "Show me how to use the graph database features"
 
-### 5. **reset** - Clear Database
-
-```javascript
-Use the reset tool to clear all data from Neo4j:
-- confirm: true (optional - defaults to true)
-```
-
-Examples:
-- "Reset the database to start fresh"
-- "Clear all scanned data from Neo4j"
-- "Use reset tool with confirm: false" (to cancel)
-
-This tool is useful when:
-- Starting analysis on a new repository
-- Clearing stale data after major refactoring
-- Removing test data
-- Starting fresh after experimentation
-
 ## 📋 Quick Start Workflow
 
 1. **First Time Setup:**
 
    - "Use the learn tool to understand the system"
-   - "Reset the database if needed" (optional - clears any existing data)
    - "Scan the current repository"
 
 2. **Daily Usage:**
@@ -85,20 +66,13 @@ This tool is useful when:
    - "CYPHER: MATCH (r:Repository)-[:CONTAINS]->(f:File) RETURN count(f)"
    - "Query: show me all error messages in the authentication module"
 
-4. **Switching Projects:**
-
-   - "Reset the database to clear old data"
-   - "Scan the new repository"
-
 ## 💡 Pro Tips
 
 - Start with `learn` to understand the graph schema
-- Use `reset` before scanning a new repository to avoid mixing data
 - Use `scan` with `watch: true` for ongoing development
 - The `query` tool accepts both natural language and raw Cypher (prefix with "CYPHER:")
 - Impact analysis helps understand change ripple effects
 - The system creates a knowledge graph of your codebase in Neo4j
-- The `reset` tool safely clears all data with confirmation
 
 Advanced query templates in src/commands/queryCommand.ts
 Circular function-call cycles (optional path/repo scope)

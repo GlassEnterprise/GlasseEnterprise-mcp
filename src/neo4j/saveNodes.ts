@@ -31,7 +31,8 @@ function serializeMeta(
 
 export async function upsertEntitiesBatch(
   driver: Driver,
-  entities: AnyEntity[]
+  entities: AnyEntity[],
+  snapshotVersion?: string
 ): Promise<void> {
   if (!entities.length) return;
 
@@ -115,6 +116,7 @@ export async function upsertEntitiesBatch(
         method: e.method ?? null,
         path: e.path ?? null,
         url: e.url ?? null,
+        snapshotVersion: snapshotVersion ?? null,
         // Store metadata as JSON string to satisfy Neo4j property constraints
         metaJson: e.meta ? JSON.stringify(serializeMeta(e.meta)) : null,
       }));
@@ -148,6 +150,7 @@ export async function upsertEntitiesBatch(
             api.path = row.path,
             api.url = row.url,
             api.metaJson = row.metaJson,
+            api.snapshotVersion = row.snapshotVersion,
             api.updatedAt = timestamp()
         RETURN count(api) as count
       `;
@@ -168,6 +171,7 @@ export async function upsertEntitiesBatch(
           language: (e as any).language ?? null,
           spanStart: (e as any).span?.startLine ?? null,
           spanEnd: (e as any).span?.endLine ?? null,
+          snapshotVersion: snapshotVersion ?? null,
           // Store metadata as JSON string (not as a map property)
           metaJson: e.meta ? JSON.stringify(serializeMeta(e.meta)) : null,
           // type-specific projections
@@ -185,6 +189,7 @@ export async function upsertEntitiesBatch(
         UNWIND $rows AS row
         CALL apoc.merge.node(['${type}'], {id: row.id}, row, {updatedAt: timestamp()})
         YIELD node
+        SET node.snapshotVersion = row.snapshotVersion
         RETURN count(node) as count
       `;
 
