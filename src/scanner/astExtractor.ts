@@ -809,9 +809,59 @@ function analyzeJsTs(root: any, code: string) {
 
   // Helpers for lineage
   const getFunctionName = (fnNode: any): string => {
+    // For arrow functions, immediately check parent variable declarator first
+    if (fnNode.type === "arrow_function") {
+      let parent = fnNode.parent;
+      while (parent && parent.type !== "program") {
+        if (parent.type === "variable_declarator") {
+          const varNameNode =
+            parent.childForFieldName?.("name") || parent.child?.(0);
+          if (varNameNode?.text && varNameNode.type === "identifier") {
+            // Return the variable name directly without character cleaning
+            // since it's a proper identifier from variable declaration
+            return varNameNode.text;
+          }
+        } else if (parent.type === "assignment_expression") {
+          const leftNode =
+            parent.childForFieldName?.("left") || parent.child?.(0);
+          if (leftNode?.text && leftNode.type === "identifier") {
+            return leftNode.text;
+          }
+        } else if (
+          parent.type === "property_definition" ||
+          parent.type === "method_definition" ||
+          parent.type === "pair"
+        ) {
+          const keyNode =
+            parent.childForFieldName?.("name") ||
+            parent.childForFieldName?.("key") ||
+            parent.child?.(0);
+          if (keyNode?.text && keyNode.type === "identifier") {
+            return keyNode.text;
+          }
+        }
+        parent = parent.parent;
+      }
+      // If no parent assignment found, return anonymous for arrow functions
+      return "anonymous";
+    }
+
+    // For regular functions, try to get the name normally
     const nameNode = fnNode.childForFieldName?.("name") || fnNode.child?.(1);
-    const raw = nameNode?.text ?? "anonymous";
-    return raw;
+    let raw = nameNode?.text ?? "anonymous";
+
+    // Only apply character cleaning if we have unwanted characters
+    // and only if this isn't already a clean identifier
+    if (raw && raw !== "anonymous") {
+      // Check if it's already a clean identifier
+      if (!/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(raw)) {
+        // Clean unwanted characters, but preserve valid identifier characters
+        raw = raw.replace(/\(\)/g, "").replace(/=>/g, "").trim();
+        raw = raw.replace(/[^\w.$]/g, "").trim();
+      }
+    }
+
+    return raw || "anonymous";
   };
   const functionKey = (fnNode: any): string => {
     const name = getFunctionName(fnNode);
@@ -899,8 +949,8 @@ function analyzeJsTs(root: any, code: string) {
       type === "arrow_function" ||
       type === "function_expression"
     ) {
-      const nameNode = n.childForFieldName?.("name") || n.child(1);
-      const name = nameNode?.text ?? "anonymous";
+      // Use the helper function to get clean function name
+      const name = getFunctionName(n);
       findings.functions.push({
         name,
         start: n.startPosition.row + 1,
@@ -1156,7 +1206,16 @@ function analyzePython(root: any, code: string) {
 
     if (type === "function_definition") {
       const nameNode = n.childForFieldName?.("name");
-      const name = nameNode?.text ?? "function";
+      let name = nameNode?.text ?? "function";
+
+      // Clean the function name by removing unwanted characters
+      name =
+        name
+          .replace(/\(\)/g, "")
+          .replace(/=>/g, "")
+          .replace(/[^\w.$]/g, "")
+          .trim() || "function";
+
       findings.functions.push({
         name,
         start: n.startPosition.row + 1,
@@ -1541,7 +1600,16 @@ function analyzeJavaLike(root: any, code: string) {
     // Method declarations - for functions and provided APIs
     if (type === "method_declaration") {
       const nameNode = n.childForFieldName?.("name") || n.child(1);
-      const name = nameNode?.text ?? "method";
+      let name = nameNode?.text ?? "method";
+
+      // Clean the function name by removing unwanted characters
+      name =
+        name
+          .replace(/\(\)/g, "")
+          .replace(/=>/g, "")
+          .replace(/[^\w.$]/g, "")
+          .trim() || "method";
+
       findings.functions.push({
         name,
         start: n.startPosition.row + 1,
