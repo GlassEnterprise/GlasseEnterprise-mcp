@@ -556,6 +556,21 @@ function isAPIMatch(consumedApi: APIEntity, providedApi: APIEntity): boolean {
     return methodsMatch(consumedApi.method, providedApi.method);
   }
 
+  // 1b) Match with /api/ prefix present in consumed or provided path
+  const rawConsumed = consumedUrl.startsWith("/")
+    ? consumedUrl
+    : "/" + consumedUrl;
+  const rawProvided = providedPath.startsWith("/")
+    ? providedPath
+    : "/" + providedPath;
+  if (
+    normalizeAPIPath(rawConsumed) === normalizeAPIPath(rawProvided) ||
+    normalizeAPIPath("/api" + rawConsumed) === normalizeAPIPath(rawProvided) ||
+    normalizeAPIPath(rawConsumed) === normalizeAPIPath("/api" + rawProvided)
+  ) {
+    return methodsMatch(consumedApi.method, providedApi.method);
+  }
+
   // 2) Consumed path contains provided path (e.g., baseURL + provided path)
   if (pPath.length > 1 && cPath.includes(pPath)) {
     return methodsMatch(consumedApi.method, providedApi.method);
@@ -614,6 +629,11 @@ function normalizeAPIPath(path: string): string {
     normalized = normalized.slice(0, -1);
   }
 
+  // Strip common API prefixes
+  normalized = normalized.replace(/^\/api(\/|$)/i, "/");
+  normalized = normalized.replace(/^\/api-v\d+(\/|$)/i, "/");
+  normalized = normalized.replace(/^\/api\/v\d+(\/|$)/i, "/");
+
   // Try decode URI components (best effort)
   try {
     normalized = decodeURI(normalized);
@@ -658,6 +678,21 @@ function calculateAPIMatchConfidence(
     confidence += 0.5;
   } else if (consumedApi.url?.includes(providedApi.path || "")) {
     confidence += 0.3;
+  }
+
+  // Boost confidence if match is due to /api/ prefix normalization
+  const rawConsumed = consumedApi.url?.startsWith("/")
+    ? consumedApi.url
+    : "/" + (consumedApi.url ?? "");
+  const rawProvided = providedApi.path?.startsWith("/")
+    ? providedApi.path
+    : "/" + (providedApi.path ?? "");
+  if (
+    normalizeAPIPath(rawConsumed) === normalizeAPIPath(rawProvided) ||
+    normalizeAPIPath("/api" + rawConsumed) === normalizeAPIPath(rawProvided) ||
+    normalizeAPIPath(rawConsumed) === normalizeAPIPath("/api" + rawProvided)
+  ) {
+    confidence += 0.2;
   }
 
   // Method match adds confidence
