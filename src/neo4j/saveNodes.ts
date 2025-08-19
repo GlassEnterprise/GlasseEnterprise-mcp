@@ -62,6 +62,9 @@ export async function upsertEntitiesBatch(
         name?: string;
         type: string;
         id: string;
+        responseType?: string;
+        responseSchema?: any;
+        requestSchema?: any;
       })[];
 
       // DEBUG: Log API entities before storage
@@ -116,6 +119,13 @@ export async function upsertEntitiesBatch(
         method: e.method ?? null,
         path: e.path ?? null,
         url: e.url ?? null,
+        responseType: e.responseType ?? null,
+        responseSchemaJson: e.responseSchema
+          ? JSON.stringify(e.responseSchema)
+          : null,
+        requestSchemaJson: e.requestSchema
+          ? JSON.stringify(e.requestSchema)
+          : null,
         snapshotVersion: snapshotVersion ?? null,
         // Store metadata as JSON string to satisfy Neo4j property constraints
         metaJson: e.meta ? JSON.stringify(serializeMeta(e.meta)) : null,
@@ -149,6 +159,9 @@ export async function upsertEntitiesBatch(
             api.method = row.method,
             api.path = row.path,
             api.url = row.url,
+            api.responseType = row.responseType,
+            api.responseSchemaJson = row.responseSchemaJson,
+            api.requestSchemaJson = row.requestSchemaJson,
             api.metaJson = row.metaJson,
             api.snapshotVersion = row.snapshotVersion,
             api.updatedAt = timestamp()

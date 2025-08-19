@@ -1,12 +1,84 @@
-import { Driver } from "neo4j-driver";
-import { runQuery } from "../neo4j/connection.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+
+/**
+ * Database existence checker - verifies Neo4j database contains data
+ */
+async function checkDatabaseExists(
+  mcpServer: any
+): Promise<{ exists: boolean; message?: string }> {
+  try {
+    // First, try to get the schema to see if database is accessible
+    const schemaResult = await mcpServer.request({
+      method: "tools/call",
+      params: {
+        name: "get_neo4j_schema",
+        arguments: {},
+      },
+    });
+
+    if (!schemaResult.content || schemaResult.content.length === 0) {
+      return {
+        exists: false,
+        message:
+          "Neo4j database is empty or schema cannot be retrieved. Please run the 'scan' tool first to populate the database with code entities and relationships.",
+      };
+    }
+
+    // Check if there's actual content in the schema response
+    const schemaText = schemaResult.content[0]?.text || "";
+    if (
+      schemaText.trim().length === 0 ||
+      schemaText.includes("No nodes found") ||
+      schemaText.includes("empty")
+    ) {
+      return {
+        exists: false,
+        message:
+          "Neo4j database appears to be empty. Please run the 'scan' tool first to populate the database with code entities and relationships.",
+      };
+    }
+
+    // Additional check - try to count nodes
+    const countResult = await mcpServer.request({
+      method: "tools/call",
+      params: {
+        name: "read_neo4j_cypher",
+        arguments: {
+          query: "MATCH (n) RETURN count(n) as nodeCount",
+          params: {},
+        },
+      },
+    });
+
+    if (countResult.content && countResult.content[0]) {
+      const result = JSON.parse(countResult.content[0].text || "[]");
+      if (result.length === 0 || (result[0] && result[0].nodeCount === 0)) {
+        return {
+          exists: false,
+          message:
+            "Neo4j database is empty (0 nodes). Please run the 'scan' tool first to populate the database with code entities and relationships.",
+        };
+      }
+    }
+
+    return { exists: true };
+  } catch (error) {
+    return {
+      exists: false,
+      message: `Cannot connect to Neo4j database: ${
+        error instanceof Error ? error.message : String(error)
+      }. Please verify your Neo4j connection and ensure the neo4j-database MCP is properly configured.`,
+    };
+  }
+}
 
 /**
  * Natural language → Cypher conversion with simple heuristics.
  * Also supports raw Cypher when prompt starts with "CYPHER:".
+ * Now uses neo4j-database MCP instead of direct driver connection.
  */
 export async function runNaturalLanguageQuery(
-  driver: Driver,
+  mcpServer: any,
   args: { prompt: string; limit?: number }
 ): Promise<string> {
   const prompt = (args.prompt || "").trim();
@@ -14,15 +86,42 @@ export async function runNaturalLanguageQuery(
     ? Math.max(0, Math.floor(args.limit as number))
     : 100;
 
+  // Check database exists and contains data first
+  const dbCheck = await checkDatabaseExists(mcpServer);
+  if (!dbCheck.exists) {
+    return `Database Check Failed\n${"=".repeat(20)}\n\n${dbCheck.message}`;
+  }
+
   // Raw Cypher passthrough
   if (/^\s*CYPHER\s*:/i.test(prompt)) {
     const cypher = prompt.replace(/^\s*CYPHER\s*:/i, "").trim();
-    const rows = await runQuery<any>(
-      driver,
-      `${cypher} LIMIT toInteger($limit)`,
-      { limit }
-    );
-    return formatResult(cypher, rows);
+    const limitedCypher = cypher.includes("LIMIT")
+      ? cypher
+      : `${cypher} LIMIT ${limit}`;
+
+    try {
+      const result = await mcpServer.request({
+        method: "tools/call",
+        params: {
+          name: "read_neo4j_cypher",
+          arguments: {
+            query: limitedCypher,
+            params: {},
+          },
+        },
+      });
+
+      if (result.content && result.content[0]) {
+        const rows = JSON.parse(result.content[0].text || "[]");
+        return formatResult(limitedCypher, rows);
+      }
+
+      return formatResult(limitedCypher, []);
+    } catch (error) {
+      return `Error executing Cypher query: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
   }
 
   // Advanced heuristic templates
@@ -196,8 +295,29 @@ export async function runNaturalLanguageQuery(
     const m = t.match.exec(prompt);
     if (m) {
       const cypher = withLimit(t.cypher(m), limit);
-      const rows = await runQuery<any>(driver, cypher, {});
-      return formatResult(cypher, rows);
+      try {
+        const result = await mcpServer.request({
+          method: "tools/call",
+          params: {
+            name: "read_neo4j_cypher",
+            arguments: {
+              query: cypher,
+              params: {},
+            },
+          },
+        });
+
+        if (result.content && result.content[0]) {
+          const rows = JSON.parse(result.content[0].text || "[]");
+          return formatResult(cypher, rows);
+        }
+
+        return formatResult(cypher, []);
+      } catch (error) {
+        return `Error executing query: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
     }
   }
 
@@ -206,8 +326,29 @@ export async function runNaturalLanguageQuery(
     const m = t.match.exec(prompt);
     if (m) {
       const cypher = withLimit(t.cypher(m), limit);
-      const rows = await runQuery<any>(driver, cypher, {});
-      return formatResult(cypher, rows);
+      try {
+        const result = await mcpServer.request({
+          method: "tools/call",
+          params: {
+            name: "read_neo4j_cypher",
+            arguments: {
+              query: cypher,
+              params: {},
+            },
+          },
+        });
+
+        if (result.content && result.content[0]) {
+          const rows = JSON.parse(result.content[0].text || "[]");
+          return formatResult(cypher, rows);
+        }
+
+        return formatResult(cypher, []);
+      } catch (error) {
+        return `Error executing query: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
     }
   }
 
@@ -287,8 +428,29 @@ export async function runNaturalLanguageQuery(
     `;
   }
 
-  const rows = await runQuery<any>(driver, fallbackCypher, {});
-  return formatResult(fallbackCypher, rows);
+  try {
+    const result = await mcpServer.request({
+      method: "tools/call",
+      params: {
+        name: "read_neo4j_cypher",
+        arguments: {
+          query: fallbackCypher,
+          params: {},
+        },
+      },
+    });
+
+    if (result.content && result.content[0]) {
+      const rows = JSON.parse(result.content[0].text || "[]");
+      return formatResult(fallbackCypher, rows);
+    }
+
+    return formatResult(fallbackCypher, []);
+  } catch (error) {
+    return `Error executing fallback query: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
 }
 
 function withLimit(cypher: string, limit: number): string {

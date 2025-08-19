@@ -18,6 +18,8 @@ import {
 
 import { Logger } from "./utils/logger.js";
 import { getDriver, Neo4jConfig } from "./neo4j/connection.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { upsertEntitiesBatch } from "./neo4j/saveNodes.js";
 import { upsertRelationshipsBatch } from "./neo4j/saveRelationships.js";
 import { scanRepositories } from "./scanner/treeSitterParser.js";
@@ -40,6 +42,50 @@ const server = new Server(
   { name: "GlassEnterprise", version: "0.1.0" },
   { capabilities: { tools: {} } }
 );
+
+// Neo4j MCP client for query delegation
+let neo4jMcpClient: Client | null = null;
+
+// Initialize connection to neo4j-database MCP
+async function initializeNeo4jMcpClient(): Promise<Client> {
+  if (neo4jMcpClient) {
+    return neo4jMcpClient;
+  }
+
+  try {
+    // Create MCP client to connect to neo4j-database server
+    const client = new Client(
+      { name: "GlassEnterprise-neo4j-client", version: "0.1.0" },
+      { capabilities: {} }
+    );
+
+    // Use uvx to run the neo4j-database MCP server
+    const transport = new StdioClientTransport({
+      command: "/Users/ahman/.local/bin/uvx",
+      args: ["mcp-neo4j-cypher@0.3.1", "--transport", "stdio"],
+      env: {
+        ...process.env,
+        // Pass through Neo4j configuration
+        NEO4J_URI: process.env.NEO4J_URI || "bolt://localhost:7687",
+        NEO4J_USERNAME: process.env.NEO4J_USERNAME || "neo4j",
+        NEO4J_PASSWORD: process.env.NEO4J_PASSWORD || "password",
+        NEO4J_DATABASE: process.env.NEO4J_DATABASE || "neo4j",
+      },
+    });
+
+    await client.connect(transport);
+    neo4jMcpClient = client;
+    logger.info("Successfully connected to neo4j-database MCP");
+    return client;
+  } catch (error) {
+    logger.error("Failed to connect to neo4j-database MCP:", error);
+    throw new Error(
+      `Could not connect to neo4j-database MCP: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+}
 
 // Helper: stable id + repository entity
 function stableId(parts: string[]): string {
@@ -259,7 +305,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const limit =
           typeof args?.limit === "number" ? (args?.limit as number) : 100;
 
-        const text = await runNaturalLanguageQuery(driver, { prompt, limit });
+        // Initialize neo4j MCP client and use it instead of direct driver
+        const mcpClient = await initializeNeo4jMcpClient();
+        const text = await runNaturalLanguageQuery(mcpClient, {
+          prompt,
+          limit,
+        });
         return { content: [{ type: "text", text }] };
       }
 

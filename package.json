@@ -1,7 +1,7 @@
 {
     "name": "GlassEnterprise",
     "version": "0.1.0",
-    "description": "VS Code MCP server that scans code repositories using Tree-sitter, extracts relationships, and stores them in Neo4j. Provides scan, impact, query, learn commands and a basic graph visualization.",
+    "description": "VS Code MCP server that scans code repositories using Tree-sitter, extracts relationships, and stores them in Neo4j. Provides scan, impact, query, learn commands with hybrid query support via neo4j-database MCP integration.",
     "main": "build/index.js",
     "type": "module",
     "scripts": {

@@ -390,14 +390,20 @@ export function extractDevelopersFromGit(repoPath: string): {
  */
 export function extractTeamFromCodeowners(repoPath: string): TeamEntity[] {
   const teams: TeamEntity[] = [];
-  const codeownersPath = join(repoPath, ".github", "CODEOWNERS");
-  const altCodeownersPath = join(repoPath, "CODEOWNERS");
+
+  // Check multiple possible CODEOWNERS paths in order of preference
+  const codeownersPaths = [
+    join(repoPath, ".github", "CODEOWNERS"),
+    join(repoPath, "docs", "CODEOWNERS"),
+    join(repoPath, "CODEOWNERS"),
+  ];
 
   let codeownersFile = "";
-  if (existsSync(codeownersPath)) {
-    codeownersFile = codeownersPath;
-  } else if (existsSync(altCodeownersPath)) {
-    codeownersFile = altCodeownersPath;
+  for (const path of codeownersPaths) {
+    if (existsSync(path)) {
+      codeownersFile = path;
+      break;
+    }
   }
 
   if (!codeownersFile) {
@@ -407,43 +413,261 @@ export function extractTeamFromCodeowners(repoPath: string): TeamEntity[] {
   try {
     const content = readFileSync(codeownersFile, "utf8");
     const lines = content.split("\n");
-    const teamSet = new Set<string>();
+    const teamCounts = new Map<string, number>();
 
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) continue;
 
-      // Look for team patterns like @org/team-name
-      const teamMatches = trimmed.match(/@[\w\-]+\/([\w\-]+)/g);
+      // Look for team patterns like @org/team-name with robust regex
+      const teamMatches = trimmed.match(
+        /@([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g
+      );
       if (teamMatches) {
         for (const match of teamMatches) {
           const teamName = match.split("/")[1];
           if (teamName) {
-            teamSet.add(teamName);
+            teamCounts.set(teamName, (teamCounts.get(teamName) || 0) + 1);
           }
         }
       }
     }
 
-    // Create team entities
-    for (const teamName of teamSet) {
+    // Select the most frequently mentioned team (single team requirement)
+    if (teamCounts.size > 0) {
+      const sortedTeams = Array.from(teamCounts.entries()).sort((a, b) => {
+        // First sort by count (descending), then by name (ascending) for deterministic tie-breaking
+        if (b[1] !== a[1]) return b[1] - a[1];
+        return a[0].localeCompare(b[0]);
+      });
+
+      const [selectedTeam, count] = sortedTeams[0];
+
+      // Log warning if multiple teams were found
+      if (teamCounts.size > 1) {
+        const allTeams = Array.from(teamCounts.keys()).join(", ");
+        logger.warn(
+          `Multiple teams found in CODEOWNERS, selected "${selectedTeam}" (mentioned ${count} times). All teams: ${allTeams}`,
+          {
+            repoPath,
+            selectedTeam,
+            allTeams: Array.from(teamCounts.entries()),
+          }
+        );
+      }
+
       const team: TeamEntity = {
         id: createHash("md5")
-          .update(`Team|${teamName}|${repoPath}`)
+          .update(`Team|${selectedTeam}|${repoPath}`)
           .digest("hex"),
         type: "Team",
-        name: teamName,
+        name: selectedTeam,
         repoRoot: repoPath,
-        description: `Team extracted from CODEOWNERS`,
+        description: `Team extracted from CODEOWNERS (mentioned ${count} times)`,
       };
       teams.push(team);
-    }
 
-    logger.info(
-      `Extracted ${teams.length} teams from CODEOWNERS in ${repoPath}`
-    );
+      logger.info(
+        `Extracted team "${selectedTeam}" from CODEOWNERS in ${repoPath}`
+      );
+    }
   } catch (error) {
     logger.warn(`Failed to read CODEOWNERS file: ${codeownersFile}`, {
+      error: (error as Error).message,
+    });
+  }
+
+  return teams;
+}
+
+/**
+ * Extract team information from README.md file
+ */
+export function extractTeamFromReadme(repoPath: string): TeamEntity[] {
+  const teams: TeamEntity[] = [];
+  const readmeFiles = ["README.md", "README.MD", "readme.md", "Readme.md"];
+
+  let readmeFile = "";
+  for (const filename of readmeFiles) {
+    const filePath = join(repoPath, filename);
+    if (existsSync(filePath)) {
+      readmeFile = filePath;
+      break;
+    }
+  }
+
+  if (!readmeFile) {
+    return teams;
+  }
+
+  try {
+    const content = readFileSync(readmeFile, "utf8");
+    const lines = content.split("\n");
+    const teamCounts = new Map<string, number>();
+    const githubTeamCounts = new Map<string, number>();
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+
+      // First priority: Look for GitHub team patterns (@org/team or org/team)
+      const githubTeamMatches = line.match(
+        /@?([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/g
+      );
+      if (githubTeamMatches) {
+        for (const match of githubTeamMatches) {
+          const teamName = match.split("/")[1];
+          if (
+            teamName &&
+            !teamName.includes("@") &&
+            !teamName.includes("http")
+          ) {
+            githubTeamCounts.set(
+              teamName,
+              (githubTeamCounts.get(teamName) || 0) + 1
+            );
+          }
+        }
+      }
+
+      // Second priority: Look for team patterns in various formats
+      const teamPatterns = [
+        /^#+\s*team:?\s*(.+)$/i, // # Team: Team Name
+        /^team:?\s*(.+)$/i, // Team: Team Name
+        /^maintained\s+by:?\s*(.+)$/i, // Maintained by: Team Name
+        /^maintainer:?\s*(.+)$/i, // Maintainer: Team Name
+        /^owner:?\s*(.+)$/i, // Owner: Team Name
+        /^developed\s+by:?\s*(.+)$/i, // Developed by: Team Name
+        /^created\s+by:?\s*(.+)$/i, // Created by: Team Name
+        /^\*\*team:?\*\*:?\s*(.+)$/i, // **Team**: Team Name
+        /^\*\*maintained\s+by:?\*\*:?\s*(.+)$/i, // **Maintained by**: Team Name
+      ];
+
+      for (const pattern of teamPatterns) {
+        const match = line.match(pattern);
+        if (match && match[1]) {
+          let teamName = match[1]
+            .replace(/[*_`]/g, "") // Remove markdown formatting
+            .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // Remove markdown links, keep text
+            .replace(/[@#]/g, "") // Remove @ and # symbols
+            .trim();
+
+          // Skip if it looks like an email or URL
+          if (
+            !teamName.includes("@") &&
+            !teamName.includes("http") &&
+            teamName.length > 0
+          ) {
+            // Extract team name from GitHub team format @org/team
+            const githubTeamMatch = teamName.match(/([^\/]+)\/(.+)/);
+            if (githubTeamMatch && githubTeamMatch[2]) {
+              teamName = githubTeamMatch[2];
+              githubTeamCounts.set(
+                teamName,
+                (githubTeamCounts.get(teamName) || 0) + 1
+              );
+            } else {
+              teamCounts.set(teamName, (teamCounts.get(teamName) || 0) + 1);
+            }
+          }
+        }
+      }
+
+      // Third priority: Look for team mentions in project description or about section
+      if (
+        line.toLowerCase().includes("team") ||
+        line.toLowerCase().includes("maintained")
+      ) {
+        // Check if this line or next few lines contain team information
+        const contextLines = lines
+          .slice(i, Math.min(i + 3, lines.length))
+          .join(" ");
+        const teamMentionMatch = contextLines.match(/team\s+(\w+(?:\s+\w+)*)/i);
+        if (teamMentionMatch && teamMentionMatch[1]) {
+          const potentialTeam = teamMentionMatch[1].trim();
+          // Only add if it's not too long and doesn't contain common non-team words
+          const skipWords = [
+            "name",
+            "members",
+            "collaboration",
+            "development",
+            "project",
+          ];
+          if (
+            potentialTeam.length <= 30 &&
+            !skipWords.some((word) =>
+              potentialTeam.toLowerCase().includes(word)
+            )
+          ) {
+            teamCounts.set(
+              potentialTeam,
+              (teamCounts.get(potentialTeam) || 0) + 1
+            );
+          }
+        }
+      }
+    }
+
+    // Select the single best team candidate (prefer GitHub team format)
+    let selectedTeam = "";
+    let selectedCount = 0;
+    let source = "";
+
+    // First check GitHub team mentions (higher priority)
+    if (githubTeamCounts.size > 0) {
+      const sortedGithubTeams = Array.from(githubTeamCounts.entries()).sort(
+        (a, b) => {
+          if (b[1] !== a[1]) return b[1] - a[1];
+          return a[0].localeCompare(b[0]);
+        }
+      );
+      [selectedTeam, selectedCount] = sortedGithubTeams[0];
+      source = "GitHub team format";
+    } else if (teamCounts.size > 0) {
+      // Fallback to regular team mentions
+      const sortedTeams = Array.from(teamCounts.entries()).sort((a, b) => {
+        if (b[1] !== a[1]) return b[1] - a[1];
+        return a[0].localeCompare(b[0]);
+      });
+      [selectedTeam, selectedCount] = sortedTeams[0];
+      source = "text patterns";
+    }
+
+    if (selectedTeam) {
+      // Log info about selection if multiple candidates were found
+      const totalCandidates = githubTeamCounts.size + teamCounts.size;
+      if (totalCandidates > 1) {
+        const allCandidates = [
+          ...Array.from(githubTeamCounts.keys()),
+          ...Array.from(teamCounts.keys()),
+        ].join(", ");
+        logger.info(
+          `Multiple team candidates found in README, selected "${selectedTeam}" from ${source} (mentioned ${selectedCount} times). All candidates: ${allCandidates}`,
+          {
+            repoPath,
+            selectedTeam,
+            source,
+            totalCandidates,
+          }
+        );
+      }
+
+      const team: TeamEntity = {
+        id: createHash("md5")
+          .update(`Team|${selectedTeam}|${repoPath}`)
+          .digest("hex"),
+        type: "Team",
+        name: selectedTeam,
+        repoRoot: repoPath,
+        description: `Team extracted from README.md via ${source} (mentioned ${selectedCount} times)`,
+      };
+      teams.push(team);
+
+      logger.info(
+        `Extracted team "${selectedTeam}" from README.md in ${repoPath} (fallback used - no CODEOWNERS found)`
+      );
+    }
+  } catch (error) {
+    logger.warn(`Failed to read README.md file: ${readmeFile}`, {
       error: (error as Error).message,
     });
   }

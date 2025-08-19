@@ -4,10 +4,67 @@ A Model Context Protocol (MCP) server that scans one or more code repositories u
 
 - scan — Ingest repositories and optionally watch for incremental changes
 - impact — Change impact analysis for a given file
-- query — Natural-language or raw Cypher queries over the code graph
+- query — Hybrid natural-language or raw Cypher queries via neo4j-database MCP integration
 - learn — Onboarding guide with schema, examples, and validation queries
 
 Works with Cline (VS Code) and any MCP-compatible client over stdio.
+
+## Hybrid Query Architecture
+
+This MCP now integrates with the `neo4j-database` MCP server to provide a hybrid query experience:
+
+- **Database Check**: Before any query, verifies Neo4j database exists and contains data
+- **CYPHER: Prefix**: Raw Cypher queries are forwarded directly to neo4j-database MCP
+- **Natural Language**: Converted to Cypher using heuristics, then forwarded to neo4j-database MCP
+- **Error Handling**: Clear messages when database is empty or unavailable
+
+This architecture provides better separation of concerns and leverages the specialized neo4j-database tooling.
+
+### Database Check Behavior
+
+The query tool now performs automatic database validation before processing any query:
+
+1. **Schema Check**: Verifies the Neo4j database schema is accessible
+2. **Content Check**: Confirms the database contains actual data (node count > 0)
+3. **Clear Messaging**: Returns helpful error messages if database is missing or empty
+
+**Example error message when database is empty:**
+
+```
+Database Check Failed
+
+Neo4j database is empty (0 nodes). Please run the 'scan' tool first to populate the database with code entities and relationships.
+```
+
+### Hybrid Query Flow Examples
+
+**Raw Cypher Query:**
+
+```
+Input: "CYPHER: MATCH (f:Function) RETURN f.name LIMIT 5"
+→ Database check passes
+→ Forward to neo4j-database MCP: "MATCH (f:Function) RETURN f.name LIMIT 5"
+→ Return formatted results
+```
+
+**Natural Language Query:**
+
+```
+Input: "list provided apis in path 'src'"
+→ Database check passes
+→ Convert to: "MATCH (a:API {direction:"provided"}) WHERE a.repoRoot CONTAINS "src" RETURN a.method, a.path, a.file ORDER BY a.file, a.path"
+→ Forward to neo4j-database MCP
+→ Return formatted results
+```
+
+**Database Empty Scenario:**
+
+```
+Input: "show all functions"
+→ Database check fails (0 nodes found)
+→ Return error message with guidance
+→ No query forwarded to neo4j-database MCP
+```
 
 ## Why use this
 
@@ -29,6 +86,7 @@ Works with Cline (VS Code) and any MCP-compatible client over stdio.
 
 - Node.js >= 18
 - Neo4j (Desktop, Aura, or Docker)
+- **mcp-neo4j-cypher** - Neo4j database MCP server (installed automatically via uvx)
 - Recommended: APOC plugin enabled on Neo4j
   - Note: Generic non-API entities are upserted with `apoc.merge.node(...)`. API nodes use plain `MERGE`. If APOC is unavailable, you may adapt `src/neo4j/saveNodes.ts` to use plain MERGE for all entities.
 
@@ -38,6 +96,10 @@ Optional performance/timeouts (environment variables):
 - `NEO4J_QUERY_TIMEOUT_MS` (default 30000)
 - `NEO4J_MAX_POOL_SIZE` (default 50)
 - `NODE_TLS_REJECT_UNAUTHORIZED=0` (dev only; enables self-signed TLS via bolt+ssc)
+
+### Neo4j Database MCP Dependency
+
+This MCP integrates with [mcp-neo4j-cypher](https://github.com/modelcontextprotocol/servers/tree/main/src/neo4j) for query execution. The dependency is automatically managed via `uvx` - no manual installation required.
 
 ## Installation
 

@@ -56,6 +56,7 @@ import {
 import {
   extractDevelopersFromGit,
   extractTeamFromCodeowners,
+  extractTeamFromReadme,
   extractTeamFromMetadata,
   inferTeamFromRepoStructure,
 } from "./developerAnalyzer.js";
@@ -221,7 +222,10 @@ function makeAPIEntityProvided(
   repoRoot: string,
   relPath: string,
   method: string,
-  path: string
+  path: string,
+  responseType?: string,
+  responseSchema?: object,
+  requestSchema?: object
 ): APIEntity {
   const methodNorm = method.toUpperCase();
   const pathKey = normalizePathForId(path);
@@ -236,6 +240,9 @@ function makeAPIEntityProvided(
     repoRoot,
     file: relPath,
     isCorrectlyClassified: false, // Added flag for classification correction
+    responseType,
+    responseSchema,
+    requestSchema,
   };
 }
 
@@ -1193,7 +1200,13 @@ function analyzePython(root: any, code: string) {
     classes: [] as { name: string; start: number; end: number }[],
     variables: [] as { name: string; start: number; end: number }[],
     consumed: [] as { method?: string; url: string }[],
-    provided: [] as { method: string; path: string }[],
+    provided: [] as {
+      method: string;
+      path: string;
+      start: number;
+      end: number;
+      functionName: string;
+    }[],
     configs: [] as string[],
     tables: [] as { name: string }[],
     errors: [] as { message: string; line: number }[],
@@ -1294,7 +1307,13 @@ function analyzeJavaLike(root: any, code: string) {
     classes: [] as { name: string; start: number; end: number }[],
     variables: [] as { name: string; start: number; end: number }[],
     consumed: [] as { method?: string; url: string }[],
-    provided: [] as { method: string; path: string }[],
+    provided: [] as {
+      method: string;
+      path: string;
+      start: number;
+      end: number;
+      functionName: string;
+    }[],
     configs: [] as string[],
     tables: [] as { name: string }[],
     columns: [] as { table: string; column: string }[],
@@ -1657,7 +1676,13 @@ function analyzeJavaLike(root: any, code: string) {
           }
           if (!fullPath) fullPath = "/";
           if (!fullPath.startsWith("/")) fullPath = "/" + fullPath;
-          findings.provided.push({ method: httpMethod, path: fullPath });
+          findings.provided.push({
+            method: httpMethod,
+            path: fullPath,
+            start: n.startPosition.row + 1,
+            end: n.endPosition.row + 1,
+            functionName: name,
+          });
         }
       }
     }
@@ -1696,27 +1721,66 @@ export async function extractEntities(
       entities.push(...developers);
       entities.push(...commits);
 
-      // Extract team information from various sources
+      // Extract team information with priority order:
+      // CODEOWNERS → README.md → metadata files → repo structure inference
+      let teamsFound = false;
+
+      // Priority 1: CODEOWNERS file
       const codeownersTeams = extractTeamFromCodeowners(repo.repoRoot);
-      entities.push(...codeownersTeams);
+      if (codeownersTeams.length > 0) {
+        entities.push(...codeownersTeams);
+        teamsFound = true;
+        logger.info(
+          `Found ${codeownersTeams.length} teams from CODEOWNERS in ${repo.repoRoot}`
+        );
+      }
 
-      const metadataTeams = extractTeamFromMetadata(repo.repoRoot);
-      entities.push(...metadataTeams);
-
-      // Infer team from repository structure if no explicit teams found
-      if (codeownersTeams.length === 0 && metadataTeams.length === 0) {
-        const inferredTeam = inferTeamFromRepoStructure(repo.repoRoot);
-        if (inferredTeam) {
-          entities.push(inferredTeam);
+      // Priority 2: README.md file (if no teams found from CODEOWNERS)
+      if (!teamsFound) {
+        const readmeTeams = extractTeamFromReadme(repo.repoRoot);
+        if (readmeTeams.length > 0) {
+          entities.push(...readmeTeams);
+          teamsFound = true;
+          logger.info(
+            `Found ${readmeTeams.length} teams from README.md in ${repo.repoRoot}`
+          );
         }
       }
 
+      // Priority 3: Metadata files (if no teams found from CODEOWNERS or README)
+      if (!teamsFound) {
+        const metadataTeams = extractTeamFromMetadata(repo.repoRoot);
+        if (metadataTeams.length > 0) {
+          entities.push(...metadataTeams);
+          teamsFound = true;
+          logger.info(
+            `Found ${metadataTeams.length} teams from metadata files in ${repo.repoRoot}`
+          );
+        }
+      }
+
+      // Priority 4: Repository structure inference (if no explicit teams found)
+      if (!teamsFound) {
+        const inferredTeam = inferTeamFromRepoStructure(repo.repoRoot);
+        if (inferredTeam) {
+          entities.push(inferredTeam);
+          teamsFound = true;
+          logger.info(
+            `Inferred team "${inferredTeam.name}" from repository structure in ${repo.repoRoot}`
+          );
+        }
+      }
+
+      // Log if no teams were found at all
+      if (!teamsFound) {
+        logger.info(`No teams found for repository: ${repo.repoRoot}`);
+      }
+
+      const totalTeamsFound = entities.filter(
+        (e) => e.type === "Team" && e.repoRoot === repo.repoRoot
+      ).length;
       logger.info(
-        `Extracted ${developers.length} developers, ${
-          commits.length
-        } commits, and ${
-          codeownersTeams.length + metadataTeams.length
-        } teams from ${repo.repoRoot}`
+        `Extracted ${developers.length} developers, ${commits.length} commits, and ${totalTeamsFound} teams from ${repo.repoRoot}`
       );
     } catch (error) {
       logger.warn(
@@ -1946,17 +2010,25 @@ export async function extractEntities(
           );
         }
 
-        // Enhanced API classification correction
+        // Enhanced API classification correction with schema attachment
         const providedAPIs = (res as any).provided ?? [];
         const consumedAPIs = (res as any).consumed ?? [];
         const hasAxios = f.content.includes("axios");
+        const functions = (res as any).functions ?? [];
 
         logger.debug(`\n=== Processing File: ${f.relPath} ===`);
         logger.debug(`Has axios: ${hasAxios}`);
         logger.debug(`Provided APIs found: ${providedAPIs.length}`);
         logger.debug(`Consumed APIs found: ${consumedAPIs.length}`);
 
-        // Correct classification for provided APIs
+        // Create a map of functions for schema lookup
+        const functionsBySpan = new Map<string, any>();
+        for (const fn of functions) {
+          const key = `${fn.start}-${fn.end}`;
+          functionsBySpan.set(key, fn);
+        }
+
+        // Correct classification for provided APIs with schema attachment
         for (const p of providedAPIs) {
           if (isFullURL(p.path)) {
             logger.debug(
@@ -1966,8 +2038,44 @@ export async function extractEntities(
               makeAPIEntityConsumed(repo.repoRoot, f.relPath, p.path, p.method)
             );
           } else {
+            // Find matching function entity to get schema information
+            let responseType: string | undefined;
+            let responseSchema: object | undefined;
+
+            // For Java APIs with span info, match by span
+            if (p.start && p.end && f.language === "java") {
+              const spanKey = `${p.start}-${p.end}`;
+              const matchingFunction = functionsBySpan.get(spanKey);
+              if (matchingFunction) {
+                // Find the corresponding FunctionEntity that was already processed
+                const funcEntity = entities.find(
+                  (e) =>
+                    e.type === "Function" &&
+                    e.name === matchingFunction.name &&
+                    (e as any).span?.startLine === matchingFunction.start &&
+                    (e as any).span?.endLine === matchingFunction.end &&
+                    e.file === f.relPath
+                ) as FunctionEntity | undefined;
+
+                if (funcEntity) {
+                  responseType = funcEntity.returns;
+                  responseSchema = funcEntity.returnsSchema;
+                  logger.debug(
+                    `🔗 Linked API ${p.method} ${p.path} to function ${funcEntity.name} with responseType: ${responseType}`
+                  );
+                }
+              }
+            }
+
             entities.push(
-              makeAPIEntityProvided(repo.repoRoot, f.relPath, p.method, p.path)
+              makeAPIEntityProvided(
+                repo.repoRoot,
+                f.relPath,
+                p.method,
+                p.path,
+                responseType,
+                responseSchema
+              )
             );
           }
         }
