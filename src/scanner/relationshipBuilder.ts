@@ -888,7 +888,7 @@ function buildDeveloperTeamRelationships(
 
         // Count shared files for collaboration strength
         let sharedFiles = 0;
-        for (const [filePath, collaborators] of collaborationMap) {
+        for (const [, collaborators] of collaborationMap) {
           if (collaborators.has(dev1Id) && collaborators.has(dev2Id)) {
             sharedFiles++;
           }

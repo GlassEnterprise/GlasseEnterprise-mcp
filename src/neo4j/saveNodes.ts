@@ -4,10 +4,6 @@ import { Logger } from "../utils/logger.js";
 
 const logger = new Logger("SaveNodes");
 
-function labelFor(type: EntityType): string {
-  return type;
-}
-
 function serializeMeta(
   meta?: Record<string, unknown>
 ): Record<string, unknown> {

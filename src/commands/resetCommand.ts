@@ -7,8 +7,7 @@ const logger = new Logger("ResetCommand");
  * Reset the Neo4j database by deleting all nodes and relationships
  */
 export async function runReset(
-  driver: Driver,
-  options?: { confirm?: boolean }
+  driver: Driver
 ): Promise<string> {
   const session = driver.session();
   

@@ -1,5 +1,5 @@
 import chokidar from "chokidar";
-import { join, resolve, relative } from "path";
+import { join, resolve } from "path";
 import { readFile } from "fs/promises";
 import { RepoFiles, FileInfo, LanguageId } from "./types.js";
 import { Logger } from "../utils/logger.js";

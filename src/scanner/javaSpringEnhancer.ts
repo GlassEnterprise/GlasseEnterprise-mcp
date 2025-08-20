@@ -115,7 +115,7 @@ export function makeColumnEntity(
  */
 export function processSpringDataRepository(
   node: any,
-  code: string,
+  _code: string,
   repoRoot: string,
   relPath: string
 ): {

@@ -9,12 +9,11 @@ import * as PythonLang from "tree-sitter-python";
 import * as JavaLang from "tree-sitter-java";
 import * as CSharpLang from "tree-sitter-c-sharp";
 
-import {
+import type {
   AnyEntity,
   APIEntity,
   ClassEntity,
   ConfigEntity,
-  DatabaseColumnEntity,
   DatabaseTableEntity,
   ErrorMessageEntity,
   FileEntity,
@@ -22,29 +21,11 @@ import {
   LanguageId,
   RepoFiles,
   RepositoryEntity,
-  SpringDataRepositoryEntity,
-  SecurityComponentEntity,
   TestEntity,
   VariableEntity,
   TypeDefinitionEntity,
-  DeveloperEntity,
-  TeamEntity,
-  CommitEntity,
 } from "./types.js";
 import { Logger } from "../utils/logger.js";
-import {
-  parseSpringDataMethodName,
-  parseJPQL,
-  parseSQL,
-  isSpringDataRepository,
-  extractEntityInfo,
-  detectSpringSecurityComponent,
-  extractSecurityPaths,
-} from "./springAnalyzer.js";
-import {
-  processSpringDataRepository,
-  processSpringSecurityComponent,
-} from "./javaSpringEnhancer.js";
 import {
   extractTSReturnType,
   extractPythonReturnType,
@@ -277,21 +258,6 @@ function makeTable(
   };
 }
 
-function makeColumn(
-  repoRoot: string,
-  relPath: string,
-  table: string,
-  column: string
-): DatabaseColumnEntity {
-  return {
-    id: stableId([repoRoot, "DatabaseColumn", table, column]),
-    type: "DatabaseColumn",
-    name: column,
-    table,
-    repoRoot,
-    file: relPath,
-  };
-}
 
 function makeConfig(
   repoRoot: string,
@@ -356,87 +322,81 @@ function makeError(
   };
 }
 
+// Enhanced variable tracking for API context
+interface APIVariableContext {
+  baseUrls: Map<string, string>; // variable name -> base URL value
+  apiVariables: Set<string>; // variables that contain API-related values
+  templateVariables: Map<string, string>; // template variable mappings
+}
+
 // Helper functions for API classification
 function isFullURL(urlOrPath: string): boolean {
   // Check if it's a full URL with protocol
   return /^https?:\/\//.test(urlOrPath) || /^\/\//.test(urlOrPath);
 }
 
-function isServerFrameworkObject(objText: string): boolean {
-  // Server-side framework patterns that provide APIs
-  const serverPatterns = [
-    "app", // Express: app.get(), app.post()
-    "router", // Express Router: router.get()
-    "server", // Generic server: server.get()
-    "fastify", // Fastify: fastify.get()
-    "koa", // Koa: koa.get() (though Koa uses different patterns)
-    "hapi", // Hapi: hapi.get()
-    "restify", // Restify: restify.get()
+function isAPIVariableName(varName: string): boolean {
+  // Check if a variable name suggests it contains API-related data
+  const apiPatterns = [
+    /^(api|base|endpoint|url|uri)_?(base|url|endpoint)?$/i,
+    /^(base|root)_?(api|url|endpoint)$/i,
+    /^server_?(url|endpoint|base)$/i,
+    /^(backend|frontend)_?(url|api|endpoint)$/i,
+    /_?(api|url|endpoint|base)$/i,
   ];
-
-  return serverPatterns.some(
-    (pattern) =>
-      objText === pattern ||
-      objText.endsWith(`.${pattern}`) ||
-      objText.startsWith(`${pattern}.`)
-  );
+  
+  return apiPatterns.some(pattern => pattern.test(varName));
 }
 
-function isClientHTTPCall(objText: string, method: string): boolean {
-  // Enhanced client-side HTTP library patterns that consume APIs
-  const clientPatterns = [
-    "axios", // axios.get(), axios.post()
-    "axiosInstance", // custom axios instances
-    "client", // client.get(), client.post() - generic HTTP client
-    "http", // http.get(), http.post() - Node.js http module or similar
-    "https", // https.get(), https.post() - Node.js https module
-    "fetch", // fetch.get() - though fetch is usually a function call
-    "request", // request.get(), request.post() - request library
-    "superagent", // superagent.get(), superagent.post()
-    "got", // got.get(), got.post()
-    "needle", // needle.get(), needle.post()
-    "node-fetch", // node-fetch library patterns
-  ];
-
-  // Frontend and React-specific patterns
-  const frontendPatterns = [
-    "this.http", // Angular HttpClient: this.http.get()
-    "this.$http", // Vue.js axios: this.$http.get()
-    "this.api", // Generic component API calls: this.api.get()
-    "service", // API service objects: service.get()
-    "httpClient", // Generic HTTP client: httpClient.get()
-    "apiClient", // Generic API client: apiClient.get()
-  ];
-
-  const allPatterns = [...clientPatterns, ...frontendPatterns];
-
-  // Check for exact matches and common variations
-  const isDirectClient = allPatterns.some((pattern) => objText === pattern);
-
-  // Check for object property access patterns (e.g., "imported.axios")
-  const hasClientInName = allPatterns.some(
-    (pattern) =>
-      objText.endsWith(`.${pattern}`) ||
-      objText.startsWith(`${pattern}.`) ||
-      objText.includes(pattern)
-  );
-
-  // Special case for axios - very strong indicator of consumed API
-  const isAxios = objText === "axios" || objText.includes("axios");
-
-  const isHTTPMethod = ["get", "post", "put", "delete", "patch"].includes(
-    method.toLowerCase()
-  );
-
-  // Debug logging for axios detection
-  if (isAxios && isHTTPMethod) {
-    logger.debug(
-      `🔍 AXIOS DETECTED: objText="${objText}", method="${method}" -> CONSUMED API`
-    );
+function isVariableDeclaration(node: any): boolean {
+  // Check if this node is part of a variable declaration
+  let parent = node.parent;
+  while (parent) {
+    if (parent.type === "variable_declarator" || 
+        parent.type === "assignment_expression" ||
+        parent.type === "property_definition") {
+      return true;
+    }
+    parent = parent.parent;
   }
-
-  return (isDirectClient || hasClientInName || isAxios) && isHTTPMethod;
+  return false;
 }
+
+function resolveAPIPath(pathText: string, context: APIVariableContext): string {
+  // Try to resolve template literals and variable references
+  let resolved = pathText;
+  
+  // Handle template literals like `${BASE_URL}/users`
+  const templateMatch = pathText.match(/\$\{([^}]+)\}(.*)$/);
+  if (templateMatch) {
+    const varName = templateMatch[1];
+    const pathSuffix = templateMatch[2];
+    
+    if (context.baseUrls.has(varName)) {
+      const baseUrl = context.baseUrls.get(varName)!;
+      resolved = baseUrl + pathSuffix;
+    } else if (context.templateVariables.has(varName)) {
+      const baseUrl = context.templateVariables.get(varName)!;
+      resolved = baseUrl + pathSuffix;
+    }
+  }
+  
+  // Handle string concatenation patterns
+  const concatMatch = pathText.match(/^([A-Z_]+)\s*\+\s*['"`](.*)['"`]$/);
+  if (concatMatch) {
+    const varName = concatMatch[1];
+    const pathSuffix = concatMatch[2];
+    
+    if (context.baseUrls.has(varName)) {
+      const baseUrl = context.baseUrls.get(varName)!;
+      resolved = baseUrl + pathSuffix;
+    }
+  }
+  
+  return resolved;
+}
+
+
 
 function isHTTPClientCall(fnText: string): boolean {
   // Enhanced detection for HTTP client function calls
@@ -797,18 +757,22 @@ function analyzeJsTs(root: any, code: string) {
     functionContexts: {},
   };
 
+  // Enhanced API variable context tracking
+  const apiContext: APIVariableContext = {
+    baseUrls: new Map(),
+    apiVariables: new Set(),
+    templateVariables: new Map(),
+  };
+
   // Heuristics to determine likely runtime context
   const codeLower = code.toLowerCase();
   const serverImportsRegex =
     /\b(from\s+['"](express|fastify|koa|hapi|restify)['"]|require\(['"](express|fastify|koa|hapi|restify)['"]\))/i;
   const nodeServerRegex =
     /\b(createServer\s*\(|express\s*\(|fastify\s*\(|new\s+Koa\s*\(|restify\.)/i;
-  const frontendLibRegex =
-    /\bfrom\s+['"](react|react-dom|next|vite|vue|@angular\/core)['"]/i;
 
   const likelyServerContext =
     serverImportsRegex.test(codeLower) || nodeServerRegex.test(codeLower);
-  const likelyFrontendContext = frontendLibRegex.test(codeLower);
 
   // Helpers for lineage
   const getFunctionName = (fnNode: any): string => {
@@ -972,7 +936,7 @@ function analyzeJsTs(root: any, code: string) {
       });
     }
 
-    // Variable declarator
+    // Variable declarator with enhanced API context tracking
     if (type === "variable_declarator") {
       const nameNode = n.childForFieldName?.("name") || n.child(0);
       const name = nameNode?.text ?? "var";
@@ -981,14 +945,25 @@ function analyzeJsTs(root: any, code: string) {
         start: n.startPosition.row + 1,
         end: n.endPosition.row + 1,
       });
+
+      // Enhanced API variable tracking
+      const init = n.childForFieldName?.("value") || n.namedChildren?.find((c: any) => c.type !== "identifier");
+      if (init && init.type === "string") {
+        const value = init.text.replace(/^['"`]/, "").replace(/['"`]$/, "");
+        
+        // Check if this looks like an API base URL
+        if (isAPIVariableName(name) && (isFullURL(value) || value.startsWith("/"))) {
+          apiContext.baseUrls.set(name, value);
+          apiContext.apiVariables.add(name);
+          logger.debug(`🔍 API Variable detected: ${name} = "${value}"`);
+        }
+      }
+
       // Lineage: writes and derives within enclosing function
       const key = enclosingFunctionKey(n);
       if (key) {
         const ctx = getCtx(key);
         ctx.writes.add(name);
-        const init =
-          n.childForFieldName?.("value") ||
-          n.namedChildren?.find((c: any) => c.type !== "identifier");
         if (init) {
           const sources = collectIdentifiers(init).filter((s) => s !== name);
           for (const s of sources) ctx.reads.add(s);
@@ -1082,7 +1057,7 @@ function analyzeJsTs(root: any, code: string) {
       }
     }
 
-    // Simplified API detection with explicit axios handling
+    // Enhanced API detection with variable context resolution
     if (type === "member_expression") {
       const obj = n.childForFieldName?.("object") || n.child(0);
       const prop = n.childForFieldName?.("property") || n.child(2);
@@ -1101,13 +1076,28 @@ function analyzeJsTs(root: any, code: string) {
           const firstArg = args?.namedChildren?.[0];
           const pathText = firstArg?.text ?? "";
           let urlOrPath = pathText.replace(/^['"`]/, "").replace(/['"`]$/, "");
-          urlOrPath = stripTemplatePlaceholders(urlOrPath);
+          
+          // Enhanced path resolution using API context
+          const resolvedPath = resolveAPIPath(urlOrPath, apiContext);
+          if (resolvedPath !== urlOrPath) {
+            logger.debug(`🔧 Path resolved: "${urlOrPath}" -> "${resolvedPath}"`);
+            urlOrPath = resolvedPath;
+          } else {
+            // Fallback to simple template placeholder removal
+            urlOrPath = stripTemplatePlaceholders(urlOrPath);
+          }
 
           if (urlOrPath) {
-            logger.debug(`\n=== API Classification ===`);
+            logger.debug(`\n=== Enhanced API Classification ===`);
             logger.debug(
               `Object: "${objText}", Method: "${method}", URL/Path: "${urlOrPath}"`
             );
+
+            // Skip if this is just a variable declaration (not an actual API call)
+            if (isVariableDeclaration(n)) {
+              logger.debug(`-> SKIPPED (variable declaration, not API call)`);
+              return;
+            }
 
             // PRIORITY 1: Explicit axios detection (highest priority)
             if (objText === "axios") {
@@ -1136,11 +1126,12 @@ function analyzeJsTs(root: any, code: string) {
                 `-> PROVIDED (server framework: ${objText}, server context detected)`
               );
               findings.provided.push({ method, path: urlOrPath });
-            } else if (isFullURL(urlOrPath)) {
+            }
+            // PRIORITY 4: Full URLs are typically consumed
+            else if (isFullURL(urlOrPath)) {
               logger.debug(`-> CONSUMED (full URL detected)`);
               findings.consumed.push({ url: urlOrPath, method });
             }
-            // PRIORITY 4: Full URLs are typically consumed
             else if (
               urlOrPath.startsWith("http") ||
               urlOrPath.startsWith("//")
@@ -1345,22 +1336,6 @@ function analyzeJavaLike(root: any, code: string) {
     // Fallback to previous heuristic
     return anno?.child(1)?.text ?? "";
   }
-  function annotationArgs(anno: any): any {
-    // For 'annotation' nodes try to find the argument list child,
-    // for 'marker_annotation' there are no args.
-    if (!anno) return null;
-    if (anno.type === "marker_annotation") return null;
-    // Try common child positions/types
-    const named = anno.namedChildren || [];
-    const argLike = named.find(
-      (c: any) =>
-        c.type.includes("argument") ||
-        c.type === "element_value" ||
-        c.type === "element_value_pair" ||
-        c.type === "element_value_array_initializer"
-    );
-    return argLike ?? anno.child?.(2) ?? null;
-  }
   function parseAnnotation(anno: any): {
     name: string;
     path: string | null;
@@ -1405,65 +1380,6 @@ function analyzeJavaLike(root: any, code: string) {
     return { name, path, method };
   }
 
-  function extractPathFromAnnotationArgs(argsNode: any): string | null {
-    if (!argsNode) return null;
-    const strNode =
-      argsNode.descendantsOfType?.(["string"])?.[0] ||
-      argsNode.namedChildren?.find((c: any) => c.type === "string");
-    if (strNode) {
-      return strNode.text.replace(/^['"`]/, "").replace(/['"`]$/, "");
-    }
-    const valueAssign = argsNode.namedChildren?.find(
-      (c: any) =>
-        c.type === "element_value_pair" &&
-        c.text.startsWith("value") &&
-        c.text.includes("=")
-    );
-    if (valueAssign) {
-      const eqIdx = valueAssign.text.indexOf("=");
-      if (eqIdx !== -1) {
-        return valueAssign.text
-          .slice(eqIdx + 1)
-          .trim()
-          .replace(/^['"`]/, "")
-          .replace(/['"`]$/, "");
-      }
-    }
-    // also support path="..."
-    const pathAssign = argsNode.namedChildren?.find(
-      (c: any) =>
-        c.type === "element_value_pair" &&
-        c.text.startsWith("path") &&
-        c.text.includes("=")
-    );
-    if (pathAssign) {
-      const eqIdx = pathAssign.text.indexOf("=");
-      if (eqIdx !== -1) {
-        return pathAssign.text
-          .slice(eqIdx + 1)
-          .trim()
-          .replace(/^['"`]/, "")
-          .replace(/['"`]$/, "");
-      }
-    }
-    return null;
-  }
-  function extractMethodFromAnnotationArgs(argsNode: any): string | null {
-    if (!argsNode) return null;
-    const methodAssign = argsNode.namedChildren?.find(
-      (c: any) =>
-        c.type === "element_value_pair" &&
-        c.text.startsWith("method") &&
-        c.text.includes("=")
-    );
-    if (methodAssign) {
-      const match = methodAssign.text.match(
-        /RequestMethod\.(GET|POST|PUT|DELETE|PATCH)/i
-      );
-      if (match) return match[1].toUpperCase();
-    }
-    return null;
-  }
   function findEnclosingClass(node: any): any | null {
     let p = node?.parent;
     while (p) {

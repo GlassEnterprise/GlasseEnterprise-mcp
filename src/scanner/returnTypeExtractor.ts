@@ -1,7 +1,3 @@
-import Parser from "tree-sitter";
-import { Logger } from "../utils/logger.js";
-
-const logger = new Logger("ReturnTypeExtractor");
 
 /**
  * Extract return type from a TypeScript/JavaScript function node
@@ -62,7 +58,7 @@ export function extractTSReturnType(
  */
 export function extractPythonReturnType(
   fnNode: any,
-  code: string
+  _code?: string
 ): { returnType?: string; isAsync?: boolean } {
   const result: { returnType?: string; isAsync?: boolean } = {};
 
@@ -240,7 +236,7 @@ export function extractParameterTypes(
  */
 export function extractTSTypeDefinitions(
   root: any,
-  code: string,
+  _code: string,
   repoRoot: string,
   relPath: string
 ): Array<any> {

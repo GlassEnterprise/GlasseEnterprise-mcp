@@ -1,5 +1,4 @@
 import { Driver } from "neo4j-driver";
-import { runQuery } from "../neo4j/connection.js";
 
 /**
  * Learn command: Onboarding walkthrough of the repository graph.
