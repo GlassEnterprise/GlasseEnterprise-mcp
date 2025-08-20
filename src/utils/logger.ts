@@ -16,7 +16,11 @@ export class Logger {
           return `[${timestamp}] [${scope}] ${level}: ${message}${metaStr}`;
         })
       ),
-      transports: [new winston.transports.Console()],
+      transports: [
+        // IMPORTANT: MCP requires stdout exclusively for JSON-RPC.
+        // Route all logs to stderr to avoid corrupting the protocol.
+        new winston.transports.Stream({ stream: process.stderr })
+      ],
     });
   }
 

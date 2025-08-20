@@ -175,6 +175,18 @@ async function tryConnect(
 }
 
 export async function getDriver(config: Neo4jConfig): Promise<Driver> {
+  // If driver exists but is not open, reset it
+  if (driverSingleton && typeof driverSingleton.verifyConnectivity === "function") {
+    try {
+      await driverSingleton.verifyConnectivity();
+    } catch {
+      try {
+        await driverSingleton.close();
+      } catch {}
+      driverSingleton = null;
+      schemaInitialized = false;
+    }
+  }
   if (driverSingleton) {
     if (!schemaInitialized) {
       await initSchema(driverSingleton);
