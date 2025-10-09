@@ -1,0 +1,40 @@
+openapi: 3.0.0
+info:
+  title: Codebase API Entities (Detected)
+  version: 1.0.0
+  description: |
+    This OpenAPI spec describes the API endpoints detected and classified by the GlassEnterprise-mcp code analysis system.
+    These endpoints may not be directly served by this repository, but are referenced as discovered "provided" and "consumed" APIs.
+
+paths:
+  /api/test:
+    get:
+      summary: Detected GET endpoint at /api/test
+      responses:
+        '200':
+          description: Success (endpoint detected in source code)
+    post:
+      summary: Detected POST endpoint at /api/test
+      responses:
+        '200':
+          description: Success (endpoint detected in source code)
+  # Additional endpoints would be listed here, as detected by the analysis
+
+components:
+  schemas:
+    APIEntity:
+      type: object
+      properties:
+        id:
+          type: string
+        method:
+          type: string
+        path:
+          type: string
+        url:
+          type: string
+        direction:
+          type: string
+          enum: [provided, consumed]
+        file:
+          type: string
